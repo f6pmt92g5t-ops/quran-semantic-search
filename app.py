@@ -256,13 +256,13 @@ def semantic_search(query, top_k=100):
 
         final_score = (
 
-            (0.65 * keyword_score)
+    (0.85 * keyword_score)
 
-            +
+    +
 
-            (0.35 * float(semantic_score))
+    (0.15 * float(semantic_score))
 
-        )
+))
 
 
         results.append({
