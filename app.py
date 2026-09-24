@@ -277,7 +277,7 @@ def semantic_search(query, top_k=100):
 
             "aya": verses_df.iloc[i]["aya"],
 
-            "text": original_text
+              "text": verse
 
         })
 
