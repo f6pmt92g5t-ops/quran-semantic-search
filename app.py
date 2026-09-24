@@ -262,7 +262,7 @@ def semantic_search(query, top_k=100):
 
     (0.15 * float(semantic_score))
 
-))
+)
 
 
         results.append({
