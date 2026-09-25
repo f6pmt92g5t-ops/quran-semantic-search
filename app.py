@@ -224,29 +224,28 @@ def semantic_search(query, top_k=100):
 
         original_words = verse_clean.split()
 
-words = [
-    get_root(w)
-    for w in original_words
-]
+        words = [
+            get_root(w)
+            for w in original_words
+        ]
+
 
 
 
         # تطابق الكلمة نفسها
-if query_clean in original_words:
-    keyword_score = 1.0
+        keyword_score = 0
 
-# تطابق العبارة
-elif query_clean in verse_clean:
-    keyword_score = 0.95
+        if query_clean in original_words:
+            keyword_score = 1.0
 
-# تطابق الجذر
-elif query_root in words:
-    keyword_score = 0.7
+        elif query_clean in verse_clean:
+            keyword_score = 0.95
 
-# مشتقات
-elif any(query_root in w for w in words):
-    keyword_score = 0.3
+        elif query_root in words:
+            keyword_score = 0.7
 
+        elif any(query_root in w for w in words):
+            keyword_score = 0.3
 
 
         if query_clean in verse_clean:
