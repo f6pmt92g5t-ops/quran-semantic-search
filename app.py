@@ -58,6 +58,17 @@ MAX_PAGES_SHOWN = 2  # cap on-screen results to this many pages; the rest is
 MAX_DISPLAY_RESULTS = RESULTS_PER_PAGE * MAX_PAGES_SHOWN
 MIN_WORD_LEN = 2  # الحد الأدنى لطول الكلمة عشان نحاول نستخرج جذرها
 
+# الحد الأدنى لعدد كلمات "الجزء" (segment) عشان يُحسَب له تمثيل دلالي مستقل.
+# سبب هذا الحد (مو رقم عشوائي): اختبرنا استعلامات مثل "الطهارة" و"النجم" ولقينا
+# كل النتائج الغلط اللي طلعت بأعلى تشابه (0.92-0.95) كانت أجزاء من كلمة أو
+# كلمتين بس (زي "فَوَٰكِهُ" أو "خَافِضَةٌ رَّافِعَةٌ") بدون أي علاقة معنوية
+# بالاستعلام. هذا نمط معروف في تمثيلات الجمل القصيرة جدًا (anisotropy): كل ما
+# قصر النص، قل السياق المتاح للنموذج، فتتقارب متجهات أجزاء قصيرة كثيرة جدًا في
+# نفس المنطقة من فضاء التمثيل بغض النظر عن معناها الفعلي، فيطلع لها تشابه
+# عالٍ زائف مع أي استعلام. الحل: أي جزء أقل من MIN_SEGMENT_WORDS كلمات يُستبعد
+# من فهرس البحث الدلالي (يبقى مع ذلك قابل للوصول عبر وضع البحث النصي بالجذر).
+MIN_SEGMENT_WORDS = 3
+
 # كلمات وظيفية/نحوية شائعة جدًا (ضمائر، حروف جر وعطف، أفعال مساعدة) —
 # نستبعدها قبل استخراج الجذر، وإلا كلمة زي "من" أو "في" بيطلع لها جذر
 # يطابق آلاف الآيات بدون أي معنى حقيقي مشترك.
@@ -197,7 +208,20 @@ def load_data():
     verses_df = pd.read_csv("verses.csv")
     verses_df["text_norm"] = verses_df["text"].apply(normalize_for_text_search)
 
-    return segments_df, embeddings, verses_df
+    # استبعاد الأجزاء القصيرة جدًا من فهرس البحث الدلالي (انظر تعليق
+    # MIN_SEGMENT_WORDS أعلاه). هذه عملية على المصفوفات المحسوبة مسبقًا فقط
+    # (فلترة صفوف)، ما تحتاج إعادة حساب أي تمثيلات دلالية.
+    word_counts = segments_df["text"].apply(lambda t: len(normalize_arabic(t).split()))
+    keep_mask = (word_counts >= MIN_SEGMENT_WORDS).to_numpy()
+    segments_df = segments_df[keep_mask].reset_index(drop=True)
+    embeddings = embeddings[keep_mask]
+
+    # لكل آية، النص الكامل (مش الجزء المقصوص) — يُستخدم في عرض نتائج البحث
+    # الدلالي حتى يشوف المستخدم الآية كاملة، بينما الترتيب (score) يبقى
+    # محسوبًا على مستوى الجزء نفسه (Tajweed segment) كما هو مصمَّم.
+    verse_text_lookup = verses_df.set_index(["sura", "aya"])["text"].to_dict()
+
+    return segments_df, embeddings, verses_df, verse_text_lookup
 
 
 @st.cache_data(show_spinner="جاري تجهيز فهرس الجذور (يُبنى مرة واحدة فقط)...")
@@ -278,7 +302,8 @@ def root_search(query: str, verses_df: pd.DataFrame, root_to_verses: dict):
 # ---------------------------------------------------------------------------
 # Mode 2: بحث دلالي — semantic search (unchanged embedding-based ranking)
 # ---------------------------------------------------------------------------
-def semantic_search(query: str, model, segments_df: pd.DataFrame, embeddings: np.ndarray):
+def semantic_search(query: str, model, segments_df: pd.DataFrame, embeddings: np.ndarray,
+                     verse_text_lookup: dict):
     query_normalized = normalize_arabic(query)
     query_embedding = model.encode(query_normalized)
     scores = util.cos_sim(query_embedding, embeddings)[0].numpy()
@@ -286,6 +311,19 @@ def semantic_search(query: str, model, segments_df: pd.DataFrame, embeddings: np
     ranked_idx = scores.argsort()[::-1]
     results = segments_df.iloc[ranked_idx].copy()
     results["score"] = scores[ranked_idx]
+
+    # آية واحدة ممكن تنقسم لعدة أجزاء، وأكثر من جزء منها ممكن يطلع بنتايج
+    # البحث. نحتفظ فقط بأعلى تشابه لكل آية (sura, aya) حتى ما تتكرر نفس
+    # الآية أكثر من مرة بالنتايج.
+    results = results.drop_duplicates(subset=["sura", "aya"], keep="first")
+
+    # نعرض نص الآية الكاملة (من verses.csv) بدل الجزء المقصوص، مع إبقاء
+    # الترتيب والـ score محسوبين على مستوى الجزء كما هو مصمَّم أصلًا.
+    results["text"] = [
+        verse_text_lookup.get((s, a), t)
+        for s, a, t in zip(results["sura"], results["aya"], results["text"])
+    ]
+
     return results.reset_index(drop=True)
 
 
@@ -461,7 +499,7 @@ def main():
     )
 
     model = load_model()
-    segments_df, embeddings, verses_df = load_data()
+    segments_df, embeddings, verses_df, verse_text_lookup = load_data()
     root_to_verses = build_root_index(verses_df)
 
     tab_text, tab_semantic = st.tabs(["Text Search", "Semantic Search"])
@@ -521,7 +559,7 @@ def main():
                 st.session_state.semantic_page = 1
                 st.session_state.last_semantic_query = semantic_query
 
-            results = semantic_search(semantic_query, model, segments_df, embeddings)
+            results = semantic_search(semantic_query, model, segments_df, embeddings, verse_text_lookup)
 
             if results.empty:
                 st.warning("No semantically similar results found.")
