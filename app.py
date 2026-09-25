@@ -185,7 +185,7 @@ def semantic_search(query, top_k=100):
 
 
     query_embedding = model.encode(
-        query_root,
+        query_clean,
         normalize_embeddings=True
     )
 
