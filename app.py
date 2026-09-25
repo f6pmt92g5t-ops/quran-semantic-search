@@ -35,6 +35,7 @@ Run locally with:
 """
 
 import re
+import math
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -204,13 +205,25 @@ def build_root_index(verses_df: pd.DataFrame):
     return root_to_verses
 
 
+def _root_weight(root: str, root_to_verses: dict, total_verses: int) -> float:
+    """وزن الجذر على غرار IDF (Inverse Document Frequency) من نظرية استرجاع
+    المعلومات: كل ما كان الجذر نادرًا (يظهر بعدد أقل من الآيات) صار أكثر
+    تمييزًا ويُعطى وزنًا أعلى، وكل ما كان شائعًا (زي جذر "ناس" أو "قول")
+    يُعطى وزنًا أقل حتى ما يطغى على جذور أدق وأندر بنفس الاستعلام.
+    بدون هذا الوزن، آية نادرة الجذر (زي "نميمة") ممكن تنطمر تحت مئات
+    الآيات اللي تشترك بس بكلمة عامة زي "الناس" — وهذا فعلاً حصل واختبرناه."""
+    doc_freq = len(root_to_verses.get(root, ()))
+    return math.log((total_verses + 1) / (doc_freq + 1)) + 1.0
+
+
 # ---------------------------------------------------------------------------
 # Mode 1: بحث نصي — root-based text search (ISRI stemmer)
 # ---------------------------------------------------------------------------
 def root_search(query: str, verses_df: pd.DataFrame, root_to_verses: dict):
     """يستخرج جذر كل كلمة مهمة بالاستعلام، ثم يرجّع كل الآيات التي فيها
-    كلمة واحدة على الأقل تشترك بنفس الجذر — مرتّبة تنازليًا حسب عدد
-    الجذور المشتركة (آية تطابق أكثر من كلمة من الاستعلام تطلع أولًا)."""
+    كلمة واحدة على الأقل تشترك بنفس الجذر — مرتّبة تنازليًا حسب مجموع
+    أوزان الجذور المتطابقة (IDF)، وليس عدد الجذور فقط، حتى تطلع الآية
+    الأدق والأكثر تمييزًا أولًا بدل ما تطغى عليها آية تشترك بس بكلمة شائعة."""
     query_norm = normalize_for_text_search(query)
     if not query_norm:
         return verses_df.iloc[0:0], []
@@ -228,17 +241,22 @@ def root_search(query: str, verses_df: pd.DataFrame, root_to_verses: dict):
     if not query_roots:
         return verses_df.iloc[0:0], query_roots
 
+    total_verses = len(verses_df)
+    weighted_score: dict[int, float] = {}
     match_count: dict[int, int] = {}
     for r in query_roots:
+        w = _root_weight(r, root_to_verses, total_verses)
         for idx in root_to_verses.get(r, ()):
+            weighted_score[idx] = weighted_score.get(idx, 0.0) + w
             match_count[idx] = match_count.get(idx, 0) + 1
 
-    if not match_count:
+    if not weighted_score:
         return verses_df.iloc[0:0], query_roots
 
-    ordered_idx = sorted(match_count.keys(), key=lambda i: (-match_count[i], i))
+    ordered_idx = sorted(weighted_score.keys(), key=lambda i: (-weighted_score[i], i))
     matches = verses_df.loc[ordered_idx].copy()
     matches["root_match_count"] = [match_count[i] for i in ordered_idx]
+    matches["root_score"] = [weighted_score[i] for i in ordered_idx]
     return matches.reset_index(drop=True), query_roots
 
 
@@ -407,4 +425,5 @@ def main():
 
 
 if __name__ == "__main__":
+    main()
     main()
