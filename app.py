@@ -1,527 +1,204 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import re
+# -*- coding: utf-8 -*-
+"""
+Semantic Search for the Holy Quran — Streamlit app
+====================================================
+Loads precomputed data (segments.csv, verses.csv, segment_embeddings.npy)
+and the same pretrained embedding model used during development, then lets
+the user search the Quran by meaning.
 
+Files required in the SAME folder as this script:
+    - segments.csv            (sura, aya, part_num, text)
+    - segment_embeddings.npy  (10705 x 384 float array, matches segments.csv row order)
+    - verses.csv              (sura, aya, text)  -- kept for reference / future use
+
+Run locally with:
+    streamlit run app.py
+"""
+
+import re
+import numpy as np
+import pandas as pd
+import streamlit as st
 from sentence_transformers import SentenceTransformer, util
 
-
-# =========================
-# Page Config
-# =========================
-
+# ---------------------------------------------------------------------------
+# Page configuration
+# ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Quran Semantic Search",
-    layout="wide"
+    page_title="البحث الدلالي في القرآن الكريم",
+    page_icon="📖",
+    layout="centered",
 )
 
+RESULTS_PER_PAGE = 10
 
-# =========================
-# Load Model
-# =========================
-
-@st.cache_resource
-def load_model():
-
-    return SentenceTransformer(
-        "paraphrase-multilingual-MiniLM-L12-v2"
-    )
+# ---------------------------------------------------------------------------
+# Text normalization (must match exactly the pipeline used to build the
+# saved embeddings, including the dagger-Alef fix from Chapter Four).
+# ---------------------------------------------------------------------------
+ARABIC_DIACRITICS = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
 
 
-model = load_model()
+def remove_diacritics(text: str) -> str:
+    # Dagger Alef (U+0670) represents a real letter, not decoration —
+    # convert it to a full Alef instead of deleting it, then strip the
+    # remaining diacritics.
+    text = re.sub(r"\u0670", "\u0627", text)
+    return ARABIC_DIACRITICS.sub("", text)
 
 
-
-# =========================
-# Load Data
-# =========================
-
-@st.cache_data
-def load_data():
-
-    verses = pd.read_csv(
-        "verses.csv"
-    )
-
-    embeddings = np.load(
-        "verse_embeddings.npy"
-    )
-
-    return verses, embeddings
-
-
-
-verses_df, verse_embeddings = load_data()
-
-
-
-# =========================
-# Normalize Arabic
-# =========================
-
-def normalize_arabic(text):
-
-    text = str(text)
-
-
-    text = re.sub(
-        r"[\u064B-\u065F\u0670\u06D6-\u06ED]",
-        "",
-        text
-    )
-
-
-    text = re.sub(
-        "[إأآٱ]",
-        "ا",
-        text
-    )
-
-
-    text = text.replace(
-        "ـ",
-        ""
-    )
-
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-
-    return text.strip()
-
-
-
-# =========================
-# Remove Basmala
-# =========================
-
-def remove_basmala(text):
-
-    text = normalize_arabic(text)
-
-
-    basmala = "بسم الله الرحمن الرحيم"
-
-
-    if text.startswith(basmala):
-
-        text = text.replace(
-            basmala,
-            "",
-            1
-        ).strip()
-
-
+def normalize_arabic(text: str) -> str:
+    text = remove_diacritics(text)
+    text = re.sub(r"[\u0610-\u061A\u06D6-\u06DC\u06DF-\u06E8\u06EA-\u06ED]", "", text)
+    text = re.sub(r"[\u0625\u0623\u0622\u0671]", "\u0627", text)  # unify Alef forms
+    text = re.sub(r"\u0640", "", text)  # remove Tatweel
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
-
-# =========================
-# Root Cleaning
-# =========================
-
-def get_root(word):
-
-    word = normalize_arabic(word)
+# ---------------------------------------------------------------------------
+# Cached loaders — these run once per app session, not on every search
+# ---------------------------------------------------------------------------
+@st.cache_resource(show_spinner="جاري تحميل نموذج البحث الدلالي...")
+def load_model():
+    return SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
 
-    word = re.sub(
-        r"[^ء-ي]",
-        "",
-        word
+@st.cache_data(show_spinner="جاري تحميل بيانات القرآن...")
+def load_data():
+    segments_df = pd.read_csv("segments.csv")
+    embeddings = np.load("segment_embeddings.npy")
+    if len(segments_df) != embeddings.shape[0]:
+        raise ValueError(
+            f"segments.csv has {len(segments_df)} rows but "
+            f"segment_embeddings.npy has {embeddings.shape[0]} — "
+            "these files must be regenerated together."
+        )
+    return segments_df, embeddings
+
+
+# ---------------------------------------------------------------------------
+# Search logic
+# ---------------------------------------------------------------------------
+def search(query: str, model, segments_df: pd.DataFrame, embeddings: np.ndarray):
+    query_normalized = normalize_arabic(query)
+    query_embedding = model.encode(query_normalized)
+    scores = util.cos_sim(query_embedding, embeddings)[0].numpy()
+
+    ranked_idx = scores.argsort()[::-1]
+    results = segments_df.iloc[ranked_idx].copy()
+    results["score"] = scores[ranked_idx]
+    return results.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
+def main():
+    st.markdown(
+        "<h1 style='text-align: center;'>📖 البحث الدلالي في القرآن الكريم</h1>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='text-align: center; color: gray;'>"
+‎        "اكتب فكرة أو موضوعًا بالعربية، وسيعرض النظام الآيات الأقرب بالمعنى."
+        "</p>",
+        unsafe_allow_html=True,
     )
 
-
-    prefixes = [
-        "وال",
-        "بال",
-        "فال",
-        "كال",
-        "لل",
-        "ال",
-        "و",
-        "ب"
-    ]
-
-
-    changed = True
-
-
-    while changed:
-
-        changed = False
-
-
-        for p in prefixes:
-
-            if word.startswith(p) and len(word) > len(p)+2:
-
-                word = word[len(p):]
-
-                changed = True
-
-                break
-
-
-    return word
-
-
-
-# =========================
-# Hybrid Semantic Search
-# =========================
-
-def semantic_search(query, top_k=100):
-
-
-    query_clean = normalize_arabic(query)
-
-    query_root = get_root(query)
-
-
-
-    query_embedding = model.encode(
-        query_root,
-        normalize_embeddings=True
-    )
-
-
-
-    semantic_scores = util.cos_sim(
-        query_embedding,
-        verse_embeddings
-    )[0].cpu().numpy()
-
-
-
-    results = []
-
-
-
-    for i, semantic_score in enumerate(semantic_scores):
-
-
-        original_text = (
-            verses_df.iloc[i]["clean_text"]
-            if "clean_text" in verses_df.columns
-            else verses_df.iloc[i]["text"]
-        )
-
-
-        verse = remove_basmala(
-            original_text
-        )
-
-
-        verse_clean = normalize_arabic(
-            verse
-        )
-
-
-        original_words = verse_clean.split()
-
-        words = [
-            get_root(w)
-            for w in original_words
-        ]
-
-
-
-
-        # تطابق الكلمة نفسها
-        keyword_score = 0
-
-        if query_clean in original_words:
-            keyword_score = 1.0
-
-        elif query_clean in verse_clean:
-            keyword_score = 0.95
-
-        elif query_root in words:
-            keyword_score = 0.7
-
-        elif any(query_root in w for w in words):
-            keyword_score = 0.3
-
-
-        if query_clean in verse_clean:
-
-            keyword_score = 1.0
-
-
-
-        elif query_root in words:
-
-            keyword_score = 0.8
-
-
-
-        elif any(
-            query_root in w
-            for w in words
-        ):
-
-            keyword_score = 0.5
-
-
-
-        final_score = (
-
-    (0.85 * keyword_score)
-
-    +
-
-    (0.15 * float(semantic_score))
-
-)
-
-
-        results.append({
-
-            "score": final_score,
-
-            "semantic": float(semantic_score),
-
-            "keyword": keyword_score,
-
-            "sura": verses_df.iloc[i]["sura"],
-
-            "aya": verses_df.iloc[i]["aya"],
-
-              "text": verse
-
-        })
-
-
-    results = sorted(
-        results,
-        key=lambda x: x["score"],
-        reverse=True
-    )
-
-
-    return results[:top_k]
-    # =========================
-# Remove Duplicates
-# =========================
-
-def remove_duplicates(results):
-
-    output = []
-
-    seen = set()
-
-
-    for r in results:
-
-        key = (
-            r["sura"],
-            r["aya"]
-        )
-
-
-        if key not in seen:
-
-            output.append(r)
-
-            seen.add(key)
-
-
-    return output
-
-
-
-# =========================
-# Streamlit Interface
-# =========================
-
-st.title(
-    "📖 Quran Semantic Search"
-)
-
-
-st.write(
-    "البحث الدلالي في القرآن الكريم"
-)
-
-
-
-query = st.text_input(
-    "اكتب كلمة أو جملة للبحث:"
-)
-
-
-
-if "results" not in st.session_state:
-
-    st.session_state.results = []
-
-
-
-if "page" not in st.session_state:
-
-    st.session_state.page = 1
-
-
-
-# =========================
-# Search Button
-# =========================
-
-if st.button("بحث"):
-
-
-    if query.strip():
-
-
-        results = semantic_search(
-            query,
-            top_k=100
-        )
-
-
-        results = remove_duplicates(
-            results
-        )
-
-
-        st.session_state.results = results
-
+    model = load_model()
+    segments_df, embeddings = load_data()
+
+    # Reset to page 1 whenever the query text actually changes
+    if "last_query" not in st.session_state:
+        st.session_state.last_query = ""
+    if "page" not in st.session_state:
         st.session_state.page = 1
 
-
-
-
-# =========================
-# Display Results
-# =========================
-
-results = st.session_state.results
-
-
-
-if results:
-
-
-    st.subheader(
-        "🔎 نتائج البحث"
+    query = st.text_input(
+‎        "ابحث بالمعنى",
+        placeholder="مثال: الصبر على البلاء",
+        label_visibility="collapsed",
     )
 
+    if query != st.session_state.last_query:
+        st.session_state.page = 1
+        st.session_state.last_query = query
 
-    page_size = 10
+    if not query.strip():
+        st.info("اكتب سؤالك أو الفكرة اللي تبحث عنها بالأعلى، ثم اضغط Enter.")
+        return
 
+    results = search(query, model, segments_df, embeddings)
 
-    total_pages = max(
-        1,
-        (len(results) + page_size - 1)
-        // page_size
+    if results.empty:
+        st.warning("لم يتم العثور على نتائج.")
+        return
+
+    # --- Top result, shown prominently above everything else ---
+    top = results.iloc[0]
+    st.markdown("### أقرب نتيجة بالمعنى")
+    st.markdown(
+        f"""
+        <div style="background-color:#f0f7f0; border-right:5px solid #2e7d32;
+                    padding:18px; border-radius:8px; margin-bottom:24px;
+                    direction: rtl; text-align: right;">
+            <p style="font-size:22px; line-height:2;">{top['text']}</p>
+            <p style="color:#2e7d32; font-weight:bold;">
+‎                سورة {top['sura']} - آية {top['aya']}
+                &nbsp;&nbsp;|&nbsp;&nbsp; درجة التشابه: {top['score']:.3f}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
+    # --- Remaining results, paginated (never discarded, just paged) ---
+    remaining = results.iloc[1:].reset_index(drop=True)
+    total_pages = max(1, -(-len(remaining) // RESULTS_PER_PAGE))  # ceil division
+    st.session_state.page = min(st.session_state.page, total_pages)
 
-    page = st.session_state.page
+    st.markdown(f"#### آيات أخرى ذات صلة ({len(remaining)} نتيجة)")
 
+    start = (st.session_state.page - 1) * RESULTS_PER_PAGE
+    end = start + RESULTS_PER_PAGE
+    page_rows = remaining.iloc[start:end]
 
-
-    start = (
-        page - 1
-    ) * page_size
-
-
-
-    end = start + page_size
-
-
-
-    current_results = results[start:end]
-
-
-
-    for index, r in enumerate(
-        current_results,
-        start=start + 1
-    ):
-
-
+    for _, row in page_rows.iterrows():
         st.markdown(
-            f"### {index}"
+            f"""
+            <div style="border-bottom:1px solid #e0e0e0; padding:12px 0;
+                        direction: rtl; text-align: right;">
+                <p style="font-size:18px; line-height:1.9;">{row['text']}</p>
+                <p style="color:#666; font-size:14px;">
+‎                    سورة {row['sura']} - آية {row['aya']}
+                    &nbsp;&nbsp;|&nbsp;&nbsp; درجة التشابه: {row['score']:.3f}
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-
-        st.write(
-            f"**سورة:** {r['sura']} | **آية:** {r['aya']}"
-        )
-
-
-        st.write(
-            r["text"]
-        )
-
-
-        similarity = max(
-            0,
-            min(
-                100,
-                int(r["score"] * 100)
+    # --- Pagination controls ---
+    if total_pages > 1:
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col1:
+            if st.session_state.page > 1:
+                if st.button("⬅ السابق"):
+                    st.session_state.page -= 1
+                    st.rerun()
+        with col2:
+            st.markdown(
+                f"<p style='text-align:center;'>صفحة {st.session_state.page} "
+                f"من {total_pages}</p>",
+                unsafe_allow_html=True,
             )
-        )
+        with col3:
+            if st.session_state.page < total_pages:
+                if st.button("التالي ➡"):
+                    st.session_state.page += 1
+                    st.rerun()
 
 
-        st.write(
-            f"درجة التشابه: {similarity}%"
-        )
-
-
-        st.divider()
-
-
-
-    # =========================
-    # Pagination
-    # =========================
-
-    col1, col2, col3 = st.columns(3)
-
-
-
-    with col1:
-
-        if st.button("⬅ السابق"):
-
-            if page > 1:
-
-                st.session_state.page -= 1
-
-                st.rerun()
-
-
-
-    with col2:
-
-        st.write(
-            f"الصفحة {page} من {total_pages}"
-        )
-
-
-
-    with col3:
-
-        if st.button("التالي ➡"):
-
-            if page < total_pages:
-
-                st.session_state.page += 1
-
-                st.rerun()
-
-
-
-else:
-
-
-    st.info(
-        "ابدأ بكتابة كلمة للبحث"
-    )
+if __name__ == "__main__":
+    main()
