@@ -163,9 +163,16 @@ def get_root(word: str) -> str:
 # ---------------------------------------------------------------------------
 # Cached loaders — these run once per app session, not on every search
 # ---------------------------------------------------------------------------
-@st.cache_resource(show_spinner="جاري تحميل نموذج البحث الدلالي...")
+@st.cache_resource(show_spinner="جاري تحميل نموذج البحث الدلالي (قد يأخذ دقيقة أول مرة)...")
 def load_model():
-    return SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    # ترقية من paraphrase-multilingual-MiniLM-L12-v2 (384 بعد) إلى
+    # paraphrase-multilingual-mpnet-base-v2 (768 بعد) — نموذج أكبر وأدق
+    # من نفس عائلة sentence-transformers (بدون أي تدريب إضافي أو تعديل
+    # يدوي، نفس المنهجية بالضبط). اختبرناه مقارنة بالنموذج القديم على
+    # نفس مجموعة الاستعلامات وأعطى تحسنًا واضحًا وموثقًا (راجع الفصل
+    # الخاص بالاختبار بالتقرير)، خصوصًا مع المفاهيم المجردة والكلمات
+    # الملتصقة بحروف العطف.
+    return SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
 
 
 @st.cache_data(show_spinner="جاري تحميل بيانات القرآن...")
