@@ -2,22 +2,33 @@
 """
 Semantic Search for the Holy Quran — Streamlit app
 ====================================================
-Two independent result layers, shown as separate sections:
+Two fully independent search modes, shown as separate tabs (matching the
+reference site's "بحث نصي" / "بحث دلالي" layout):
 
-  1) Literal match  (تطابق حرفي) — exact substring match against the full
-     verse text, after normalization. If the user types (part of) a verse,
-     that verse is shown immediately, at the top.
-  2) Semantic match  (تشابه بالمعنى) — the existing embedding-based search,
+  1) بحث نصي (root-based text search) — extracts the Arabic root of every
+     significant word in the query using NLTK's ISRI light stemmer
+     (Taghva, Elkhoury & Coombs, 2005 — a published, citable algorithm),
+     then returns every verse containing a word with a matching root.
+     This groups all grammatical derivatives of a word together
+     (e.g. النجم / النجوم / نجم / والنجم / بالنجم all share the root "نجم"),
+     which is exactly what a reader means by "look up this word".
+
+  2) بحث دلالي (semantic search) — the original embedding-based search,
      completely unchanged: it still ranks all indexed segments by cosine
-     similarity, for thematic / conceptual queries.
+     similarity, for thematic / conceptual queries that don't share any
+     literal words with the target verses (e.g. "الصبر على البلاء" ->
+     "أفلا يشكرون").
 
-These two layers are independent and are never blended into a single score.
-No stemming and no keyword-weighted scoring is used anywhere in this file.
+These two modes are independent and are never blended into a single score.
+Root-based matching (mode 1) is a deliberate methodology decision — see the
+project report, Section 5.4.1, for the discussion of why light stemming was
+adopted for the text-search mode while the semantic mode remains a pure,
+stemming-free embedding search.
 
 Files required in the SAME folder as this script:
     - segments.csv            (sura, aya, part_num, text)
     - segment_embeddings.npy  (must have the SAME row count as segments.csv)
-    - verses.csv              (sura, aya, text)  -- used for the literal layer
+    - verses.csv              (sura, aya, text)  -- used for the root-search mode
 
 Run locally with:
     streamlit run app.py
@@ -28,6 +39,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from sentence_transformers import SentenceTransformer, util
+from nltk.stem.isri import ISRIStemmer
 
 # ---------------------------------------------------------------------------
 # Page configuration
@@ -39,14 +51,12 @@ st.set_page_config(
 )
 
 RESULTS_PER_PAGE = 10
-MAX_LITERAL_MATCHES = 5
+MIN_WORD_LEN = 2  # الحد الأدنى لطول الكلمة عشان نحاول نستخرج جذرها
 
 # كلمات وظيفية/نحوية شائعة جدًا (ضمائر، حروف جر وعطف، أفعال مساعدة) —
-# استبعادها من مطابقة الكلمة المفردة تمنع نتائج عشوائية (لو ظهرت كلمة
-# "من" أو "على" بكلام المستخدم، ما نبي نطابق أي آية فيها هالحرف لأنه
-# موجود بكل صفحة تقريبًا). هذه قائمة كلمات شائعة قياسية، وليست تجذيعًا:
-# لا نُغيّر شكل أي كلمة ولا نستخرج جذرها، فقط نستبعد كلمات معيّنة بالضبط.
-LITERAL_STOPWORDS = {
+# نستبعدها قبل استخراج الجذر، وإلا كلمة زي "من" أو "في" بيطلع لها جذر
+# يطابق آلاف الآيات بدون أي معنى حقيقي مشترك.
+STOPWORDS = {
     "من", "الى", "إلى", "على", "في", "ان", "إن", "انه", "إنه", "ما", "لا",
     "الذين", "الا", "إلا", "ولا", "وما", "ثم", "لكم", "او", "أو", "له",
     "الذي", "التي", "هو", "هي", "هم", "هن", "انت", "أنت", "انتم", "أنتم",
@@ -64,7 +74,7 @@ LITERAL_STOPWORDS = {
 # Text normalization (must match exactly the pipeline used to build the
 # saved embeddings, including the dagger-Alef fix from Chapter Four).
 # ---------------------------------------------------------------------------
-ARABIC_DIACRITICS = re.compile(r"[ً-ٰٟۖ-ۭ]")
+ARABIC_DIACRITICS = re.compile(r"[ً-ٰٟۖ-ۭ]")
 
 
 def remove_diacritics(text: str) -> str:
@@ -77,15 +87,15 @@ def remove_diacritics(text: str) -> str:
 
 def normalize_arabic(text: str) -> str:
     text = remove_diacritics(text)
-    text = re.sub(r"[ؐ-ؚۖ-ۜ۟-۪ۨ-ۭ]", "", text)
+    text = re.sub(r"[ؐ-ؚۖ-ۜ۟-۪ۨ-ۭ]", "", text)
     text = re.sub(r"[إأآٱ]", "ا", text)  # unify Alef forms
     text = re.sub(r"ـ", "", text)  # remove Tatweel
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
-def normalize_for_literal_match(text: str) -> str:
-    """طبقة تسامح إضافية للتطابق الحرفي فقط (لا تُستخدم مع النموذج الدلالي):
+def normalize_for_text_search(text: str) -> str:
+    """طبقة تسامح إضافية لوضع البحث النصي فقط (لا تُستخدم مع النموذج الدلالي):
     توحّد الألف المقصورة (ى) مع الياء (ي)، لأن رسم القرآن العثماني يكتب كلمات
     كثيرة الاستخدام مثل "الذى" بألف مقصورة بينما يكتبها المستخدم العادي "الذي"
     بالياء — نفس الكلمة، رسمان مختلفان."""
@@ -94,10 +104,21 @@ def normalize_for_literal_match(text: str) -> str:
     return text
 
 
-# نطبّع قائمة كلمات التوقف بنفس طريقة تطبيع النصوص (توحيد الألف المقصورة مع
-# الياء وغيرها)، وإلا كلمة مثل "على" (بألف مقصورة) ما تطابق نسختها المطبَّعة
-# "علي" (بياء) اللي تطلع من نص المستخدم بعد التطبيع.
-LITERAL_STOPWORDS = {normalize_for_literal_match(w) for w in LITERAL_STOPWORDS}
+# نطبّع قائمة كلمات التوقف بنفس طريقة تطبيع النصوص، وإلا كلمة مثل "على"
+# (بألف مقصورة) ما تطابق نسختها المطبَّعة "علي" (بياء).
+STOPWORDS = {normalize_for_text_search(w) for w in STOPWORDS}
+
+_stemmer = ISRIStemmer()
+
+
+def get_root(word: str) -> str:
+    """يرجّع جذر الكلمة عبر خوارزمية ISRI (تجذيع خفيف موثّق أكاديميًا،
+    Taghva/Elkhoury/Coombs 2005) المتوفرة في مكتبة NLTK. لا نخترع أي قواعد
+    تجذيع يدوية هنا — نعتمد بالكامل على الخوارزمية المنشورة."""
+    try:
+        return _stemmer.stem(word)
+    except Exception:
+        return word
 
 
 # ---------------------------------------------------------------------------
@@ -120,54 +141,71 @@ def load_data():
         )
 
     verses_df = pd.read_csv("verses.csv")
-    verses_df["text_norm"] = verses_df["text"].apply(normalize_for_literal_match)
+    verses_df["text_norm"] = verses_df["text"].apply(normalize_for_text_search)
 
     return segments_df, embeddings, verses_df
 
 
+@st.cache_data(show_spinner="جاري تجهيز فهرس الجذور (يُبنى مرة واحدة فقط)...")
+def build_root_index(verses_df: pd.DataFrame):
+    """يبني فهرسًا: جذر الكلمة -> مجموعة أرقام الآيات (index في verses_df)
+    التي تحتوي على كلمة بهذا الجذر. يُبنى مرة واحدة ويُخزَّن مؤقتًا
+    (cache) عشان ما نعيد استخراج الجذور من جديد مع كل عملية بحث."""
+    root_to_verses: dict[str, set[int]] = {}
+    for idx, text_norm in zip(verses_df.index, verses_df["text_norm"]):
+        roots_in_this_verse = set()
+        for w in text_norm.split():
+            if len(w) < MIN_WORD_LEN or w in STOPWORDS:
+                continue
+            root = get_root(w)
+            if not root or len(root) < 2:
+                continue
+            roots_in_this_verse.add(root)
+        for r in roots_in_this_verse:
+            root_to_verses.setdefault(r, set()).add(idx)
+    return root_to_verses
+
+
 # ---------------------------------------------------------------------------
-# Layer 1: literal match (exact substring, after normalization)
+# Mode 1: بحث نصي — root-based text search (ISRI stemmer)
 # ---------------------------------------------------------------------------
-def literal_search(query: str, verses_df: pd.DataFrame) -> pd.DataFrame:
-    query_norm = normalize_for_literal_match(query)
+def root_search(query: str, verses_df: pd.DataFrame, root_to_verses: dict):
+    """يستخرج جذر كل كلمة مهمة بالاستعلام، ثم يرجّع كل الآيات التي فيها
+    كلمة واحدة على الأقل تشترك بنفس الجذر — مرتّبة تنازليًا حسب عدد
+    الجذور المشتركة (آية تطابق أكثر من كلمة من الاستعلام تطلع أولًا)."""
+    query_norm = normalize_for_text_search(query)
     if not query_norm:
-        return verses_df.iloc[0:0]
+        return verses_df.iloc[0:0], []
 
-    # المستوى الأول: تطابق العبارة كاملة (سواء كتب المستخدم آية كاملة،
-    # أو جزء منها، أو عبارة أطول تحتوي على نص الآية)
-    mask = verses_df["text_norm"].apply(
-        lambda v: query_norm in v or v in query_norm
-    )
-    matches = verses_df[mask].copy()
+    words = [w for w in query_norm.split() if len(w) >= MIN_WORD_LEN and w not in STOPWORDS]
+    if not words:
+        return verses_df.iloc[0:0], []
 
-    # المستوى الثاني: لو ما فيه تطابق للعبارة كاملة (مثلاً المستخدم كتب
-    # وصفًا مثل "الصيام وأحكامه" وليس نص آية)، نفتش كل كلمة من كلامه على
-    # حدة — بدون أي اشتقاق أو تجذيع، مجرد فحص وجود الكلمة كما كتبها
-    # المستخدم بالضبط داخل الآية.
-    if matches.empty:
-        words = [
-            w for w in query_norm.split()
-            if len(w) >= 3 and w not in LITERAL_STOPWORDS
-        ]
-        if words:
-            # مطابقة كلمة كاملة منفصلة (مو أي جزء من كلمة أطول) — وإلا
-            # "الحج" تطابق "الحجر" غلطًا لأنها جزء منها حرفيًا
-            word_mask = verses_df["text_norm"].apply(
-                lambda v: any(w in v.split() for w in words)
-            )
-            matches = verses_df[word_mask].copy()
+    query_roots = []
+    for w in words:
+        r = get_root(w)
+        if r and r not in query_roots:
+            query_roots.append(r)
 
-    if matches.empty:
-        return matches
+    if not query_roots:
+        return verses_df.iloc[0:0], query_roots
 
-    # الأقرب طولاً للاستعلام أولاً (تطابق أدق يُعرض أولاً)
-    matches["length_diff"] = (matches["text_norm"].str.len() - len(query_norm)).abs()
-    matches = matches.sort_values("length_diff").head(MAX_LITERAL_MATCHES)
-    return matches.drop(columns=["length_diff"])
+    match_count: dict[int, int] = {}
+    for r in query_roots:
+        for idx in root_to_verses.get(r, ()):
+            match_count[idx] = match_count.get(idx, 0) + 1
+
+    if not match_count:
+        return verses_df.iloc[0:0], query_roots
+
+    ordered_idx = sorted(match_count.keys(), key=lambda i: (-match_count[i], i))
+    matches = verses_df.loc[ordered_idx].copy()
+    matches["root_match_count"] = [match_count[i] for i in ordered_idx]
+    return matches.reset_index(drop=True), query_roots
 
 
 # ---------------------------------------------------------------------------
-# Layer 2: semantic search (unchanged embedding-based ranking)
+# Mode 2: بحث دلالي — semantic search (unchanged embedding-based ranking)
 # ---------------------------------------------------------------------------
 def semantic_search(query: str, model, segments_df: pd.DataFrame, embeddings: np.ndarray):
     query_normalized = normalize_arabic(query)
@@ -181,6 +219,54 @@ def semantic_search(query: str, model, segments_df: pd.DataFrame, embeddings: np
 
 
 # ---------------------------------------------------------------------------
+# Shared UI helpers
+# ---------------------------------------------------------------------------
+def render_verse_card(text: str, sura, aya, badge: str = "", color: str = "#1565c0",
+                       bg: str = "#eef6ff", size: str = "22px"):
+    st.markdown(
+        f"""
+        <div style="background-color:{bg}; border-right:5px solid {color};
+                    padding:18px; border-radius:8px; margin-bottom:14px;
+                    direction: rtl; text-align: right;">
+            <p style="font-size:{size}; line-height:2;">{text}</p>
+            <p style="color:{color}; font-weight:bold;">
+                سورة {sura} - آية {aya} {badge}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def paginate(df: pd.DataFrame, page_key: str):
+    total_pages = max(1, -(-len(df) // RESULTS_PER_PAGE))  # ceil division
+    st.session_state[page_key] = min(st.session_state.get(page_key, 1), total_pages)
+    page = st.session_state[page_key]
+
+    start = (page - 1) * RESULTS_PER_PAGE
+    end = start + RESULTS_PER_PAGE
+    page_rows = df.iloc[start:end]
+
+    if total_pages > 1:
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col1:
+            if page > 1 and st.button("⬅ السابق", key=f"{page_key}_prev"):
+                st.session_state[page_key] -= 1
+                st.rerun()
+        with col2:
+            st.markdown(
+                f"<p style='text-align:center;'>صفحة {page} من {total_pages}</p>",
+                unsafe_allow_html=True,
+            )
+        with col3:
+            if page < total_pages and st.button("التالي ➡", key=f"{page_key}_next"):
+                st.session_state[page_key] += 1
+                st.rerun()
+
+    return page_rows
+
+
+# ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 def main():
@@ -190,125 +276,96 @@ def main():
     )
     st.markdown(
         "<p style='text-align: center; color: gray;'>"
-        "اكتب آية أو جزءًا منها للتطابق الحرفي، أو فكرة/موضوعًا للبحث بالمعنى."
+        "بحث نصي بالجذر اللغوي، أو بحث دلالي بالمعنى — اختر التبويب المناسب."
         "</p>",
         unsafe_allow_html=True,
     )
 
     model = load_model()
     segments_df, embeddings, verses_df = load_data()
+    root_to_verses = build_root_index(verses_df)
 
-    if "last_query" not in st.session_state:
-        st.session_state.last_query = ""
-    if "page" not in st.session_state:
-        st.session_state.page = 1
-
-    query = st.text_input(
-        "ابحث",
-        placeholder="مثال: والنجم إذا هوى — أو: الصبر على البلاء",
-        label_visibility="collapsed",
-    )
-
-    if query != st.session_state.last_query:
-        st.session_state.page = 1
-        st.session_state.last_query = query
-
-    if not query.strip():
-        st.info("اكتب آية أو فكرة بالأعلى، ثم اضغط Enter.")
-        return
+    tab_text, tab_semantic = st.tabs(["🔤 بحث نصي", "✨ بحث دلالي"])
 
     # ------------------------------------------------------------------
-    # Layer 1: literal match — shown first, only when something is found
+    # Tab 1: بحث نصي — root-based matching
     # ------------------------------------------------------------------
-    literal_matches = literal_search(query, verses_df)
-
-    if not literal_matches.empty:
-        st.markdown("### 🎯 تطابق حرفي")
-        for _, row in literal_matches.iterrows():
-            st.markdown(
-                f"""
-                <div style="background-color:#eef6ff; border-right:5px solid #1565c0;
-                            padding:18px; border-radius:8px; margin-bottom:14px;
-                            direction: rtl; text-align: right;">
-                    <p style="font-size:22px; line-height:2;">{row['text']}</p>
-                    <p style="color:#1565c0; font-weight:bold;">
-                        سورة {row['sura']} - آية {row['aya']}
-                    </p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    # ------------------------------------------------------------------
-    # Layer 2: semantic search — always shown, independent of layer 1
-    # ------------------------------------------------------------------
-    results = semantic_search(query, model, segments_df, embeddings)
-
-    if results.empty:
-        st.warning("لم يتم العثور على نتائج مشابهة بالمعنى.")
-        return
-
-    st.markdown("### 🔎 نتائج مشابهة بالمعنى")
-
-    top = results.iloc[0]
-    st.markdown(
-        f"""
-        <div style="background-color:#f0f7f0; border-right:5px solid #2e7d32;
-                    padding:18px; border-radius:8px; margin-bottom:24px;
-                    direction: rtl; text-align: right;">
-            <p style="font-size:22px; line-height:2;">{top['text']}</p>
-            <p style="color:#2e7d32; font-weight:bold;">
-                سورة {top['sura']} - آية {top['aya']}
-                &nbsp;&nbsp;|&nbsp;&nbsp; درجة التشابه: {top['score']:.3f}
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    remaining = results.iloc[1:].reset_index(drop=True)
-    total_pages = max(1, -(-len(remaining) // RESULTS_PER_PAGE))  # ceil division
-    st.session_state.page = min(st.session_state.page, total_pages)
-
-    st.markdown(f"#### آيات أخرى ذات صلة ({len(remaining)} نتيجة)")
-
-    start = (st.session_state.page - 1) * RESULTS_PER_PAGE
-    end = start + RESULTS_PER_PAGE
-    page_rows = remaining.iloc[start:end]
-
-    for _, row in page_rows.iterrows():
-        st.markdown(
-            f"""
-            <div style="border-bottom:1px solid #e0e0e0; padding:12px 0;
-                        direction: rtl; text-align: right;">
-                <p style="font-size:18px; line-height:1.9;">{row['text']}</p>
-                <p style="color:#666; font-size:14px;">
-                    سورة {row['sura']} - آية {row['aya']}
-                    &nbsp;&nbsp;|&nbsp;&nbsp; درجة التشابه: {row['score']:.3f}
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
+    with tab_text:
+        st.caption(
+            "يبحث عن كل الآيات التي تحتوي على أي صيغة مشتقة من نفس جذر الكلمة "
+            "(مثال: البحث عن \"النجم\" يطلع \"والنجم إذا هوى\" و\"النجم الثاقب\" معًا)."
+        )
+        text_query = st.text_input(
+            "بحث نصي",
+            placeholder="مثال: النجم، الصبر، يوسف...",
+            label_visibility="collapsed",
+            key="text_query_input",
         )
 
-    if total_pages > 1:
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col1:
-            if st.session_state.page > 1:
-                if st.button("⬅ السابق"):
-                    st.session_state.page -= 1
-                    st.rerun()
-        with col2:
-            st.markdown(
-                f"<p style='text-align:center;'>صفحة {st.session_state.page} "
-                f"من {total_pages}</p>",
-                unsafe_allow_html=True,
-            )
-        with col3:
-            if st.session_state.page < total_pages:
-                if st.button("التالي ➡"):
-                    st.session_state.page += 1
-                    st.rerun()
+        if text_query.strip():
+            if text_query != st.session_state.get("last_text_query", ""):
+                st.session_state.text_page = 1
+                st.session_state.last_text_query = text_query
+
+            matches, query_roots = root_search(text_query, verses_df, root_to_verses)
+
+            if matches.empty:
+                st.warning("لم يتم العثور على آيات تطابق جذر هذه الكلمة/الكلمات.")
+            else:
+                st.success(f"تم العثور على {len(matches)} آية (بحث بالجذر اللغوي)")
+                page_rows = paginate(matches, "text_page")
+                for _, row in page_rows.iterrows():
+                    badge = ""
+                    if row.get("root_match_count", 1) > 1:
+                        badge = f"&nbsp;&nbsp;|&nbsp;&nbsp; تطابق {int(row['root_match_count'])} كلمات"
+                    render_verse_card(row["text"], row["sura"], row["aya"], badge=badge)
+        else:
+            st.info("اكتب كلمة أو أكثر بالأعلى، ثم اضغط Enter.")
+
+    # ------------------------------------------------------------------
+    # Tab 2: بحث دلالي — semantic search (unchanged)
+    # ------------------------------------------------------------------
+    with tab_semantic:
+        st.caption(
+            "يبحث عن الآيات الأقرب بالمعنى (وليس بلفظ الكلمة)، مفيد للمواضيع "
+            "والأفكار العامة مثل \"الصبر على البلاء\"."
+        )
+        semantic_query = st.text_input(
+            "بحث دلالي",
+            placeholder="مثال: الصبر على البلاء، التوكل على الله...",
+            label_visibility="collapsed",
+            key="semantic_query_input",
+        )
+
+        if semantic_query.strip():
+            if semantic_query != st.session_state.get("last_semantic_query", ""):
+                st.session_state.semantic_page = 1
+                st.session_state.last_semantic_query = semantic_query
+
+            results = semantic_search(semantic_query, model, segments_df, embeddings)
+
+            if results.empty:
+                st.warning("لم يتم العثور على نتائج مشابهة بالمعنى.")
+            else:
+                top = results.iloc[0]
+                st.markdown("#### 🥇 أقرب نتيجة")
+                render_verse_card(
+                    top["text"], top["sura"], top["aya"],
+                    badge=f"&nbsp;&nbsp;|&nbsp;&nbsp; درجة التشابه: {top['score']:.3f}",
+                    color="#2e7d32", bg="#f0f7f0",
+                )
+
+                remaining = results.iloc[1:].reset_index(drop=True)
+                st.markdown(f"#### آيات أخرى ذات صلة ({len(remaining)} نتيجة)")
+                page_rows = paginate(remaining, "semantic_page")
+                for _, row in page_rows.iterrows():
+                    render_verse_card(
+                        row["text"], row["sura"], row["aya"],
+                        badge=f"&nbsp;&nbsp;|&nbsp;&nbsp; درجة التشابه: {row['score']:.3f}",
+                        color="#666", bg="#ffffff", size="18px",
+                    )
+        else:
+            st.info("اكتب فكرة أو موضوعًا بالأعلى، ثم اضغط Enter.")
 
 
 if __name__ == "__main__":
