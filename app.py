@@ -179,6 +179,10 @@ def load_model():
 def load_data():
     segments_df = pd.read_csv("segments.csv")
     embeddings = np.load("segment_embeddings.npy")
+    # الملف قد يكون محفوظًا بدقة float16 (لتصغير الحجم تحت حد رفع GitHub
+    # 25 ميجا) — نحوّله لـ float32 هنا مرة وحدة (ومخزّن بالـ cache) عشان
+    # يتوافق مع متجه الاستعلام اللي يطلعه النموذج دائمًا بصيغة float32.
+    embeddings = embeddings.astype(np.float32)
     if len(segments_df) != embeddings.shape[0]:
         raise ValueError(
             f"segments.csv has {len(segments_df)} rows but "
