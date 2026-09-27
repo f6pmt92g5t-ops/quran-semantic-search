@@ -41,6 +41,7 @@ Run locally with:
 
 import re
 import io
+import os
 import math
 import unicodedata
 from collections import Counter
@@ -60,7 +61,9 @@ st.set_page_config(
 )
 
 MODEL_NAME = "Amer-Surur1/quran-finetuned-mpnet"
-MORPH_FILE = "quran-morphology.txt"
+# كل ملفات البيانات تُقرأ من مجلد app.py نفسه، فيعمل التطبيق مهما كان مجلد التشغيل.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MORPH_FILE = os.path.join(BASE_DIR, "quran-morphology.txt")
 
 RESULTS_SHOWN = 20   # عدد النتائج في الجدول (الباقي في ملف Excel)
 MIN_WORD_LEN = 2
@@ -688,13 +691,13 @@ class SearchData:
 @st.cache_resource(show_spinner="جاري تحميل بيانات القرآن والمعجم الصرفي (مرة واحدة)...")
 def load_data() -> SearchData:
     D = SearchData()
-    segments_df = pd.read_csv("segments.csv")
-    embeddings = np.load("segment_embeddings.npy").astype(np.float32)
+    segments_df = pd.read_csv(os.path.join(BASE_DIR, "segments.csv"))
+    embeddings = np.load(os.path.join(BASE_DIR, "segment_embeddings.npy")).astype(np.float32)
     if len(segments_df) != embeddings.shape[0]:
         raise ValueError(
             f"segments.csv has {len(segments_df)} rows but segment_embeddings.npy has "
             f"{embeddings.shape[0]} — these files must be regenerated together.")
-    verses_df = pd.read_csv("verses.csv")
+    verses_df = pd.read_csv(os.path.join(BASE_DIR, "verses.csv"))
 
     # البسملة ملصقة في بداية الآية الأولى من 112 سورة في verses.csv، وليست من
     # الآية (إلا الفاتحة). نحذفها من نص العرض ومن الفهرسة، ونُبقي النص الأصلي
@@ -898,6 +901,9 @@ CUSTOM_CSS = """
 """
 
 
+# ملف Excel لكل النتائج (~6000 صف) يأخذ حوالي ثانية؛ نخزّنه حتى لا يُعاد بناؤه
+# مع كل تفاعل في الصفحة (تبديل تبويب، ضغط مربع اختيار...).
+@st.cache_data(max_entries=64, show_spinner=False)
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -919,7 +925,7 @@ def render_results_table(df: pd.DataFrame, score_label: str, height: int = 700):
         cols.append("also")
         config["also"] = st.column_config.TextColumn("Same text also in", width="small")
     st.dataframe(view[cols], column_config=config, hide_index=True,
-                 use_container_width=True, height=height)
+                 width="stretch", height=height)
 
 
 def download_button(df: pd.DataFrame, cols: list, name: str, key: str):
@@ -937,6 +943,11 @@ def download_button(df: pd.DataFrame, cols: list, name: str, key: str):
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
+def has_arabic(text: str) -> bool:
+    """استعلام بلا أي حرف عربي (hello، 123، رموز) لا معنى للبحث به في النص القرآني."""
+    return re.search(r"[\u0621-\u064A]", text) is not None
+
+
 def main():
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
     st.markdown(
@@ -965,8 +976,10 @@ def main():
             "(e.g. searching \"النجم\" also finds \"والنجم إذا هوى\" and \"النجم الثاقب\"). "
             "Exact words and close derivatives are listed first.")
         text_query = st.text_input("Text search", placeholder="e.g. النجم, الصبر, يوسف...",
-                                   label_visibility="collapsed", key="text_query_input")
-        if text_query.strip():
+                                   label_visibility="collapsed", key="text_query_input", max_chars=200)
+        if text_query.strip() and not has_arabic(text_query):
+            st.warning("Please type the query in Arabic letters (e.g. الصبر).")
+        elif text_query.strip():
             matches = text_search(text_query, D)
             if matches.empty:
                 st.warning("No verses matched the root of this word.")
@@ -988,8 +1001,10 @@ def main():
             "general themes and ideas such as \"الصبر على البلاء\".")
         semantic_query = st.text_input("Semantic search",
                                        placeholder="e.g. الصبر على البلاء, التوكل على الله...",
-                                       label_visibility="collapsed", key="semantic_query_input")
-        if semantic_query.strip():
+                                       label_visibility="collapsed", key="semantic_query_input", max_chars=200)
+        if semantic_query.strip() and not has_arabic(semantic_query):
+            st.warning("Please type the query in Arabic letters (e.g. الصبر على البلاء).")
+        elif semantic_query.strip():
             results = semantic_search(semantic_query, model, D)
             relevant = results[results["relevant"]]
             show_all = st.checkbox("Include loosely related verses", value=False, key="sem_all")
@@ -1028,7 +1043,7 @@ def main():
                 c1.metric("MRR", f"{avg['new MRR']:.3f}", f"{avg['new MRR'] - avg['old MRR']:+.3f}")
                 c2.metric("P@10", f"{avg['new P@10']:.3f}", f"{avg['new P@10'] - avg['old P@10']:+.3f}")
                 c3.metric("R@20", f"{avg['new R@20']:.3f}", f"{avg['new R@20'] - avg['old R@20']:+.3f}")
-                st.dataframe(bench, hide_index=True, use_container_width=True)
+                st.dataframe(bench, hide_index=True, width="stretch")
                 st.download_button("Download benchmark (CSV)", bench.to_csv(index=False).encode("utf-8-sig"),
                                    "benchmark.csv", "text/csv", key="bench_dl")
 
