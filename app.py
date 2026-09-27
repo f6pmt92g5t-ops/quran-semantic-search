@@ -3,7 +3,7 @@
 Semantic Search for the Holy Quran — Streamlit app
 ====================================================
 Two fully independent search modes, shown as separate tabs (matching the
-reference site's "بحث نصي" / "بحث دلالي" layout):
+reference site's "بحث دلالي" / "بحث نصي" layout):
 
   1) بحث نصي (root-based text search) — extracts the Arabic root of every
      significant word in the query using NLTK's ISRI light stemmer
@@ -37,6 +37,7 @@ Run locally with:
 import re
 import math
 import io
+import hashlib
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -200,6 +201,17 @@ def load_model():
 @st.cache_data(show_spinner="جاري تحميل بيانات القرآن...")
 def load_data():
     segments_df = pd.read_csv("segments.csv")
+
+    # --- تشخيص مؤقت: نطبع بصمة (MD5) وحجم ملف segment_embeddings.npy الفعلي
+    # اللي يقرأه التطبيق الآن، عشان نتأكد إنه فعلاً آخر نسخة مرفوعة على
+    # GitHub، ومو نسخة قديمة متعلقة بالكاش. احذف هذا القسم بعد ما تتأكد. ---
+    with open("segment_embeddings.npy", "rb") as f:
+        _raw_bytes = f.read()
+    _file_md5 = hashlib.md5(_raw_bytes).hexdigest()
+    st.sidebar.markdown("**🔍 تشخيص مؤقت (احذفه بعد التأكد):**")
+    st.sidebar.code(f"npy md5: {_file_md5}\nnpy size: {len(_raw_bytes)} bytes")
+    # --- نهاية قسم التشخيص المؤقت ---
+
     embeddings = np.load("segment_embeddings.npy")
     # الملف قد يكون محفوظًا بدقة float16 (لتصغير الحجم تحت حد رفع GitHub
     # 25 ميجا) — نحوّله لـ float32 هنا مرة وحدة (ومخزّن بالـ cache) عشان
@@ -662,4 +674,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
