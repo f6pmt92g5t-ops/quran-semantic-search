@@ -187,6 +187,9 @@ _NON_LETTERS = re.compile(r"[^ء-ي]")
 def uthmani_plain(text: str, dagger_as_alef: bool = True) -> str:
     text = text.replace("ٱ", "ا")
     text = text.replace("وٰ", "ا")
+    # ألف مقصورة وخنجرية داخل الكلمة تُكتب ألفًا ("ألهىٰكم" = ألهاكم، "توفىٰهم" = توفاهم)،
+    # وفي آخرها ألف مقصورة ("هدىٰ" = هدى)
+    text = re.sub(r"ىٰ(?=[\u0621-\u064A])", "ا", text)
     text = text.replace("ىٰ", "ى")
     text = text.replace("ۧ", "ي")
     text = text.replace("ٰ", "ا" if dagger_as_alef else "")
@@ -754,6 +757,7 @@ def _nfc(text):
 # والآية تأخذ أعلى تشابه بين أجزائها ونوافذها.
 WINDOW_WORDS = 6
 WINDOW_STRIDE = 3
+SHORT_PENALTY = 0.3   # يُطرح من تشابه الأجزاء القصيرة (أقل من 3 كلمات) حين تكون كل ما في الآية
 WINDOW_PENALTY = 0.15  # يُطرح من تشابه النافذة قبل مقارنته بتشابه الجزء الكامل
 # النتيجة المقاسة (استعلامات حقيقية): النوافذ لم تحسّن التقييم — عقوبة 0 أنزلت P@10 من 0.812
 # إلى 0.731 (نصوص قصيرة أكثر = تطابقات زائفة أكثر)، وعقوبة 0.15 تعادل عدم استخدامها. لذلك ملف
@@ -1323,6 +1327,9 @@ def load_data() -> SearchData:
     D.seg_v = seg_v
     D.prim = long_enough & ~is_basmala & ~is_formula
     D.second = long_enough & ~is_basmala & is_formula
+    # آيات كلها قصيرة ("ألهاكم التكاثر" 102:1، "والشمس وضحاها" 91:1): أجزاؤها أقل من 3 كلمات
+    # فكانت خارج الفهرس الدلالي تمامًا (تشابه = 0). تُستخدم فقط إذا لم يكن للآية غيرها.
+    D.short = ~long_enough & ~is_basmala
     # النوافذ (انظر make_windows): اختيارية — إذا لم يوجد الملف يعمل البحث بالأجزاء فقط.
     D.win_emb = None
     win_path = os.path.join(BASE_DIR, "window_embeddings.npy")
@@ -1366,6 +1373,8 @@ def semantic_components(query: str, model, D: SearchData):
         wsem = _verse_max(D.win_emb @ q - WINDOW_PENALTY, D.win_v, D.win_mask, D.n)
         sem = np.fmax(sem, wsem)          # fmax: يتجاهل NaN/-inf من جهة واحدة
     sem = np.where(np.isfinite(sem), sem, sem2)
+    sem3 = _verse_max(cos - SHORT_PENALTY, D.seg_v, D.short, D.n)
+    sem = np.where(np.isfinite(sem), sem, sem3)
     sem = np.where(np.isfinite(sem), sem, 0.0).astype(np.float32)
     return sem, cos
 
