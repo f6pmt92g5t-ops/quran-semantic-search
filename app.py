@@ -180,14 +180,21 @@ def get_root(word: str) -> str:
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner="جاري تحميل نموذج البحث الدلالي (قد يأخذ دقيقة أول مرة)...")
 def load_model():
-    # ترقية من paraphrase-multilingual-MiniLM-L12-v2 (384 بعد) إلى
+    # ترقية 1: من paraphrase-multilingual-MiniLM-L12-v2 (384 بعد) إلى
     # paraphrase-multilingual-mpnet-base-v2 (768 بعد) — نموذج أكبر وأدق
-    # من نفس عائلة sentence-transformers (بدون أي تدريب إضافي أو تعديل
-    # يدوي، نفس المنهجية بالضبط). اختبرناه مقارنة بالنموذج القديم على
-    # نفس مجموعة الاستعلامات وأعطى تحسنًا واضحًا وموثقًا (راجع الفصل
-    # الخاص بالاختبار بالتقرير)، خصوصًا مع المفاهيم المجردة والكلمات
-    # الملتصقة بحروف العطف.
-    return SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
+    # من نفس عائلة sentence-transformers.
+    #
+    # ترقية 2 (المرحلة الحالية): تدريب إضافي (fine-tuning) لنفس نموذج
+    # mpnet على 16929 زوج (تفسير الآية ↔ نص الآية، بأسلوبين: فقرة كاملة
+    # وعبارات قصيرة تحاكي شكل استعلام حقيقي)، عشان يتعلم خصوصية المعجم
+    # القرآني بدل الاعتماد على فهم عام فقط. اختبرناه بمقارنة MRR قبل/بعد
+    # (بنفس آلية الدمج الهجين، على أسئلة لم تدخل التدريب إطلاقًا لضمان
+    # فصل صحيح train/test): تحسّن من 0.4169 إلى ~0.49 (~18%). راجع فصل
+    # التقييم بالتقرير للتفاصيل والقيود المتبقية.
+    #
+    # ⚠️ استبدل السطر التالي باسم مستودعك على Hugging Face Hub بعد رفع
+    # النموذج (خطوات الرفع بالسكربت المرفق منفصل):
+    return SentenceTransformer("Amer-Surur1/quran-finetuned-mpnet")
 
 
 @st.cache_data(show_spinner="جاري تحميل بيانات القرآن...")
@@ -256,6 +263,23 @@ def _root_weight(root: str, root_to_verses: dict, total_verses: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# دالة مشتركة: استخراج جذور الاستعلام (يستخدمها وضع البحث النصي، وأيضًا
+# الدمج الهجين (hybrid) داخل البحث الدلالي أدناه)
+# ---------------------------------------------------------------------------
+def extract_query_roots(query: str) -> list:
+    query_norm = normalize_for_text_search(query)
+    if not query_norm:
+        return []
+    words = [w for w in query_norm.split() if len(w) >= MIN_WORD_LEN and w not in STOPWORDS]
+    query_roots = []
+    for w in words:
+        r = get_root(w)
+        if r and r not in query_roots:
+            query_roots.append(r)
+    return query_roots
+
+
+# ---------------------------------------------------------------------------
 # Mode 1: بحث نصي — root-based text search (ISRI stemmer)
 # ---------------------------------------------------------------------------
 def root_search(query: str, verses_df: pd.DataFrame, root_to_verses: dict):
@@ -263,20 +287,7 @@ def root_search(query: str, verses_df: pd.DataFrame, root_to_verses: dict):
     كلمة واحدة على الأقل تشترك بنفس الجذر — مرتّبة تنازليًا حسب مجموع
     أوزان الجذور المتطابقة (IDF)، وليس عدد الجذور فقط، حتى تطلع الآية
     الأدق والأكثر تمييزًا أولًا بدل ما تطغى عليها آية تشترك بس بكلمة شائعة."""
-    query_norm = normalize_for_text_search(query)
-    if not query_norm:
-        return verses_df.iloc[0:0], []
-
-    words = [w for w in query_norm.split() if len(w) >= MIN_WORD_LEN and w not in STOPWORDS]
-    if not words:
-        return verses_df.iloc[0:0], []
-
-    query_roots = []
-    for w in words:
-        r = get_root(w)
-        if r and r not in query_roots:
-            query_roots.append(r)
-
+    query_roots = extract_query_roots(query)
     if not query_roots:
         return verses_df.iloc[0:0], query_roots
 
@@ -300,13 +311,77 @@ def root_search(query: str, verses_df: pd.DataFrame, root_to_verses: dict):
 
 
 # ---------------------------------------------------------------------------
-# Mode 2: بحث دلالي — semantic search (unchanged embedding-based ranking)
+# Mode 2: بحث دلالي — semantic search + دمج هجين خفيف مع تطابق الجذر
 # ---------------------------------------------------------------------------
+# لماذا أضفنا هذا: اختبرنا استعلامات مجردة (الطهارة، النفاق، الظلم، التفكر في
+# الكون) ولقينا نتايج ضعيفة رغم إن كلمة الاستعلام نفسها تشترك بنفس الجذر
+# اللغوي مع الآية الصحيحة (تأكدنا بالتجربة: "الطهارة" و"المتطهرين" -> نفس
+# الجذر "طهر" عبر ISRI؛ "النفاق" و"منافقون" -> نفس الجذر "نفق"؛ وهكذا).
+# هذا نمط عام بالعربي (المصطلح الشرعي غالبًا مشتق من نفس جذر آيته)، مو خاص
+# بهالأمثلة. الحل: دمج هجين (hybrid search) — إشارة لغوية (الجذر) + إشارة
+# دلالية (التضمين)، وهي تقنية موثقة بنظرية استرجاع المعلومات (Manning et
+# al., المرجع [1] بالتقرير)، تُستخدم بكل محركات البحث الحديثة تقريبًا.
+# الفرق عن تجربة "الدمج بين نموذجين" اللي فشلت: هنا ما ندمج درجتين من
+# نفس المقياس غير المتوافق، بل نضيف مكافأة فوق الدرجة الدلالية الأصلية.
+#
+# ملاحظة مهمة اكتشفناها بالاختبار الفعلي: أول نسخة من هذا الدمج استخدمت
+# سقف مكافأة صغير جدًا (0.08)، وما نفع — لأن نموذج mpnet أحيانًا يعطي
+# آيات غلط تمامًا درجة تشابه عالية جدًا (0.88-0.90)، والفجوة بينها وبين
+# الآية الصحيحة أكبر من 0.08. رفعنا السقف، وربطنا حجم المكافأة **بمدى
+# ندرة الجذر فعليًا بكل القرآن** (مو نسبته داخل استعلام واحد فقط)، حتى
+# جذر نادر ومميز (زي "طهر"، يظهر بـ26 آية بس من أصل 6236) ياخذ مكافأة
+# كبيرة تضمن تفوقه، بينما جذر شائع جدًا (زي "قول") ياخذ مكافأة صغيرة
+# فقط، فما يطغى بلا مبرر على استعلامات عامة.
+ROOT_BONUS_MAX = 0.5  # سقف أقصى مطلق للمكافأة (كافٍ لتجاوز فجوات mpnet الملحوظة)
+_GLOBAL_MAX_ROOT_WEIGHT = None  # يُحسب مرة وحدة لكل عدد آيات (انظر أسفل)
+
+
+def _root_distinctiveness(weight: float, total_verses: int) -> float:
+    """يحوّل وزن IDF لنسبة 0-1: جذر يظهر بآية واحدة بس (أندر ما يمكن) ياخذ
+    قيمة قريبة من 1، وجذر يظهر بكل آيات القرآن تقريبًا ياخذ قيمة قريبة من 0."""
+    global _GLOBAL_MAX_ROOT_WEIGHT
+    if _GLOBAL_MAX_ROOT_WEIGHT is None:
+        _GLOBAL_MAX_ROOT_WEIGHT = math.log(total_verses + 1) + 1.0  # حالة df=0 النظرية
+    return min(1.0, weight / _GLOBAL_MAX_ROOT_WEIGHT)
+
+
 def semantic_search(query: str, model, segments_df: pd.DataFrame, embeddings: np.ndarray,
-                     verse_text_lookup: dict):
+                     verse_text_lookup: dict, verses_df: pd.DataFrame, root_to_verses: dict):
     query_normalized = normalize_arabic(query)
     query_embedding = model.encode(query_normalized)
-    scores = util.cos_sim(query_embedding, embeddings)[0].numpy()
+    scores = util.cos_sim(query_embedding, embeddings)[0].numpy().astype(np.float64)
+
+    # --- الدمج الهجين: مكافأة لكل آية تشترك بجذر مع الاستعلام ---
+    query_roots = extract_query_roots(query)
+    if query_roots:
+        total_verses = len(verses_df)
+        root_weights = {r: _root_weight(r, root_to_verses, total_verses) for r in query_roots}
+        root_bonus_value = {
+            r: ROOT_BONUS_MAX * _root_distinctiveness(w, total_verses)
+            for r, w in root_weights.items()
+        }
+
+        # فهرس عكسي سريع: verse_idx -> مجموع مكافآت الجذور المطابقة بهذه الآية
+        verse_bonus: dict[int, float] = {}
+        for r, bonus in root_bonus_value.items():
+            for vidx in root_to_verses.get(r, ()):
+                verse_bonus[vidx] = verse_bonus.get(vidx, 0.0) + bonus
+
+        # تحويل فهرس الآية (verses_df) إلى مفتاح (sura, aya) مرة وحدة
+        verse_key_by_idx = {
+            idx: (int(s), int(a))
+            for idx, s, a in zip(verses_df.index, verses_df["sura"], verses_df["aya"])
+            if idx in verse_bonus
+        }
+        bonus_by_key = {
+            verse_key_by_idx[idx]: min(ROOT_BONUS_MAX, b)
+            for idx, b in verse_bonus.items() if idx in verse_key_by_idx
+        }
+
+        if bonus_by_key:
+            seg_keys = list(zip(segments_df["sura"].astype(int), segments_df["aya"].astype(int)))
+            bonus_array = np.array([bonus_by_key.get(k, 0.0) for k in seg_keys])
+            scores = scores + bonus_array
 
     ranked_idx = scores.argsort()[::-1]
     results = segments_df.iloc[ranked_idx].copy()
@@ -559,7 +634,8 @@ def main():
                 st.session_state.semantic_page = 1
                 st.session_state.last_semantic_query = semantic_query
 
-            results = semantic_search(semantic_query, model, segments_df, embeddings, verse_text_lookup)
+            results = semantic_search(semantic_query, model, segments_df, embeddings,
+                                       verse_text_lookup, verses_df, root_to_verses)
 
             if results.empty:
                 st.warning("No semantically similar results found.")
@@ -586,3 +662,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
