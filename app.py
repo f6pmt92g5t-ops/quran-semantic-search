@@ -362,6 +362,8 @@ def semantic_search(query: str, model, segments_df: pd.DataFrame, embeddings: np
     query_normalized = normalize_arabic(query)
     query_embedding = model.encode(query_normalized)
     scores = util.cos_sim(query_embedding, embeddings)[0].numpy().astype(np.float64)
+    raw_scores = scores.copy()  # التشابه الدلالي الخام قبل أي مكافأة جذر (تشخيص مؤقت)
+    bonus_array_full = np.zeros_like(scores)  # مكافأة الجذر لكل جزء (تشخيص مؤقت)
 
     # --- الدمج الهجين: مكافأة لكل آية تشترك بجذر مع الاستعلام ---
     query_roots = extract_query_roots(query)
@@ -394,10 +396,13 @@ def semantic_search(query: str, model, segments_df: pd.DataFrame, embeddings: np
             seg_keys = list(zip(segments_df["sura"].astype(int), segments_df["aya"].astype(int)))
             bonus_array = np.array([bonus_by_key.get(k, 0.0) for k in seg_keys])
             scores = scores + bonus_array
+            bonus_array_full = bonus_array
 
     ranked_idx = scores.argsort()[::-1]
     results = segments_df.iloc[ranked_idx].copy()
     results["score"] = scores[ranked_idx]
+    results["raw_score"] = raw_scores[ranked_idx]  # تشخيص مؤقت
+    results["root_bonus"] = bonus_array_full[ranked_idx]  # تشخيص مؤقت
 
     # آية واحدة ممكن تنقسم لعدة أجزاء، وأكثر من جزء منها ممكن يطلع بنتايج
     # البحث. نحتفظ فقط بأعلى تشابه لكل آية (sura, aya) حتى ما تتكرر نفس
@@ -494,6 +499,36 @@ CUSTOM_CSS = """
     }
 </style>
 """
+
+
+def render_results_table(df: pd.DataFrame, score_col: str = None, score_label: str = "Score",
+                          extra_col: str = None, extra_label: str = "", max_rows: int = 20,
+                          height: int = 700):
+    """يعرض النتائج بشكل جدول مضغوط (مصفوفة) بدل بطاقات كبيرة تاخذ مساحة
+    شاشة كاملة لكل نتيجة — الهدف نشوف حوالي 20 نتيجة كاملة بمساحة واحدة
+    متوسطة الحجم بدون الحاجة لأكثر من لقطة شاشة."""
+    view = df.head(max_rows).copy()
+    view.insert(0, "Ref", [f"{s}:{a}" for s, a in zip(view["sura"], view["aya"])])
+
+    cols = ["Ref", "text"]
+    column_config = {
+        "Ref": st.column_config.TextColumn("Surah:Aya", width="small"),
+        "text": st.column_config.TextColumn("Verse", width="large"),
+    }
+    if score_col is not None:
+        cols.append(score_col)
+        column_config[score_col] = st.column_config.NumberColumn(score_label, format="%.3f", width="small")
+    if extra_col is not None:
+        cols.append(extra_col)
+        column_config[extra_col] = st.column_config.NumberColumn(extra_label, width="small")
+
+    st.dataframe(
+        view[cols],
+        column_config=column_config,
+        hide_index=True,
+        use_container_width=True,
+        height=height,
+    )
 
 
 def render_verse_card(text: str, sura, aya, meta: str = "", primary: bool = False):
@@ -617,12 +652,21 @@ def main():
                 st.warning("No verses matched the root of this word.")
             else:
                 st.success(f"{len(matches)} verse(s) found (root-based match)")
-                for page_rows in paginate_capped(matches, "text_page", "text_search"):
-                    for _, row in page_rows.iterrows():
-                        meta = ""
-                        if row.get("root_match_count", 1) > 1:
-                            meta = f"{int(row['root_match_count'])} matching words"
-                        render_verse_card(row["text"], row["sura"], row["aya"], meta=meta)
+                render_results_table(
+                    matches,
+                    extra_col="root_match_count" if "root_match_count" in matches.columns else None,
+                    extra_label="Matching words",
+                )
+                if len(matches) > 20:
+                    export_cols = [c for c in ["sura", "aya", "text", "root_match_count", "root_score"]
+                                   if c in matches.columns]
+                    st.download_button(
+                        label=f"Download all {len(matches)} results (Excel)",
+                        data=to_excel_bytes(matches[export_cols]),
+                        file_name="text_search_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="text_search_download_all",
+                    )
         else:
             st.info("Type one or more words above, then press Enter.")
 
@@ -652,25 +696,38 @@ def main():
             if results.empty:
                 st.warning("No semantically similar results found.")
             else:
-                top = results.iloc[0]
-                st.markdown("**Closest match**")
-                render_verse_card(
-                    top["text"], top["sura"], top["aya"],
-                    meta=f"similarity: {top['score']:.3f}",
-                    primary=True,
-                )
+                # --- تشخيص مؤقت: جدول يفصل التشابه الخام عن مكافأة الجذر
+                # عشان نتأكد هل الموديل المدرَّب فعلاً محسّن أو إن مكافأة
+                # الجذر (تصل لـ 0.5) هي اللي مسيطرة على الرقم. ---
+                with st.expander("🔍 تشخيص مؤقت: تفكيك التشابه الخام عن مكافأة الجذر"):
+                    debug_cols = ["sura", "aya", "raw_score", "root_bonus", "score"]
+                    st.dataframe(
+                        results[debug_cols].head(20).rename(columns={
+                            "raw_score": "raw cosine (الموديل فقط)",
+                            "root_bonus": "root bonus (الجذر فقط)",
+                            "score": "final score (المعروض)",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                # --- نهاية قسم التشخيص المؤقت ---
 
-                remaining = results.iloc[1:].reset_index(drop=True)
-                st.markdown(f"**Other related verses** ({len(remaining)} results)")
-                for page_rows in paginate_capped(remaining, "semantic_page", "semantic_search"):
-                    for _, row in page_rows.iterrows():
-                        render_verse_card(
-                            row["text"], row["sura"], row["aya"],
-                            meta=f"similarity: {row['score']:.3f}",
-                        )
+                st.markdown(f"**{len(results)} result(s)** — top match highlighted")
+                render_results_table(results, score_col="score", score_label="Similarity", max_rows=20)
+
+                if len(results) > 20:
+                    export_cols = [c for c in ["sura", "aya", "text", "score"] if c in results.columns]
+                    st.download_button(
+                        label=f"Download all {len(results)} results (Excel)",
+                        data=to_excel_bytes(results[export_cols]),
+                        file_name="semantic_search_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="semantic_search_download_all",
+                    )
         else:
             st.info("Type a theme or idea above, then press Enter.")
 
 
 if __name__ == "__main__":
     main()
+    
