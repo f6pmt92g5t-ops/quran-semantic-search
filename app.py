@@ -93,6 +93,10 @@ TIER_WEAK = 0.15     # نفس الجذر فقط بمعنى آخر غالبًا (
 # قال 21%، كان 18%، رب 14%) لا تميّز شيئًا، فلا تُعطى وزنًا لفظيًا.
 LEMMA_DF_MAX = 0.12
 
+# كلمة غير موجودة بلفظها في القرآن: يُعطى جذرها مطابقة متوسطة إذا كان جذرًا
+# محددًا (عدد آياته <= 100)، وضعيفة إذا كان واسعًا (غالبًا متعدد المعاني).
+FALLBACK_ROOT_MAX_VERSES = 100
+
 # عتبات "الصلة": تُعرض النتيجة كنتيجة ذات صلة إذا طابقت كلمات الاستعلام بما
 # يكفي، أو كان تشابهها الدلالي قريبًا من أفضل تشابه. ما عدا ذلك يبقى متاحًا في
 # ملف Excel، بدل عرض "6063 نتيجة" أغلبها بلا علاقة.
@@ -113,6 +117,10 @@ _RAW_STOPWORDS = {
     "فإن", "وان", "وإن", "به", "لها", "لهم", "لهن", "منه", "منها", "منهم",
     "فيه", "فيها", "عليه", "عليها", "عليهم", "عليكم", "كما", "بما", "مما",
     "انا", "أنا", "اني", "إني", "الله",
+    # أدوات السؤال والصياغة (فصحى وعامية): "كيف أتعامل مع الظلم" — كلمة "كيف"
+    # لها جذر في المعجم فكانت تُحتسب موضوعًا بوزن أعلى من "الظلم" نفسها.
+    "كيف", "لماذا", "ماذا", "متى", "اين", "أين", "هل", "كم", "اي", "أي", "ماهو",
+    "ماهي", "وش", "ايش", "ليش", "شنو", "حول", "بخصوص", "بشأن", "عند", "يعني",
 }
 # ملاحظة: "الرحمن/الرحيم/بسم" أُزيلت من القائمة؛ كانت موجودة لأن البسملة ملصقة
 # بأول كل سورة فتُغرق النتائج، والآن البسملة تُحذف من النص (انظر load_data)،
@@ -252,12 +260,13 @@ def _parse_morphology(path: str) -> dict:
             parts = line.split("\t")
             if len(parts) != 4:
                 continue
-            loc, form, _pos, feats = parts
+            loc, form, pos, feats = parts
             s, a, w, _seg = loc.split(":")
             key = (int(s), int(a), int(w))
             d = words.get(key)
             if d is None:
-                d = words[key] = {"full": "", "root": None, "lemma": None, "vf": None, "stem": None}
+                d = words[key] = {"full": "", "root": None, "lemma": None, "vf": None, "stem": None,
+                                  "noun": False}
             d["full"] += form
             f = feats.split("|")
             root = lem = vf = None
@@ -273,6 +282,7 @@ def _parse_morphology(path: str) -> dict:
                 root = "PN:" + lem          # أسماء الأعلام بلا جذر: كل اسم "جذر" نفسه
             if root and d["root"] is None:
                 d["root"], d["lemma"], d["vf"], d["stem"] = root, lem, vf, form
+                d["noun"] = pos == "N"
             elif d["stem"] is None and not is_affix:
                 d["stem"] = form
     return words
@@ -289,6 +299,7 @@ def _guess_form(word_key: str, root: str, root_forms: dict):
         return None
     a, b, c = rk
     patterns = [
+        ("اي" + b + "ا" + c, "4"),        # إفعال من جذر مهموز الأول: إيثار (أثر)، إيمان (أمن)
         ("ت" + a + b + "ي" + c, "2"),
         ("است" + a + b + "ا" + c, "10"),
         ("ا" + a + "ت" + b + "ا" + c, "8"),
@@ -338,7 +349,7 @@ def build_lexicon(verses_df: pd.DataFrame, path: str = MORPH_FILE) -> Lexicon:
         w_form.append(d["full"])
         if vf:
             root_forms.setdefault(r, set()).add(vf)
-        analysis = (r, l, vf)
+        analysis = (r, l, vf, d["noun"])
         keys = set()
         for t in (d["full"], d["stem"] or "", l or ""):
             if t:
@@ -407,6 +418,29 @@ def _strip_article(k: str) -> str:
     return k
 
 
+def _fallback_root(k: str, base: str, lex: Lexicon):
+    """جذر ISRI مع تصحيح أخطائه المعروفة في الجذور المهموزة والمعتلة والمضعّفة،
+    ثم نقبله فقط إذا كان جذرًا قرآنيًا. أمثلة مقاسة: الإيثار←"يثر" (الصحيح أثر)،
+    الوفاء←"وفء" (الصحيح وفي)، العفة←"عفه" (الصحيح عفف)."""
+    for word in (k, base):
+        stem = lex_key(_isri.stem(word))
+        cands = [stem]
+        if len(stem) == 3:
+            if stem[0] in "يوا":
+                cands.append("ا" + stem[1:])          # همزة أولى: يثر ← أثر
+            if stem[2] in "ءاوي":
+                cands += [stem[:2] + "ي", stem[:2] + "و"]   # لام معتلة: وفء ← وفي
+        if stem.endswith("ه") and len(stem) == 3:
+            cands.append(stem[:2] + stem[1])          # مضعّف: عفه ← عفف
+        if len(stem) == 2:
+            cands.append(stem + stem[1])              # مضعّف: عف ← عفف
+        for c in cands:
+            r = lex.root_by_key.get(c)
+            if r:
+                return r
+    return None
+
+
 def analyze_query_word(word: str, lex: Lexicon, ignore_stop: bool = False):
     """Returns a list of matching rules (kind, key, tier) for one query word."""
     k = lex_key(word)
@@ -419,8 +453,15 @@ def analyze_query_word(word: str, lex: Lexicon, ignore_stop: bool = False):
     rules = []
     hits = _lookup_surface(k, lex, allow_h_suffix=not word.strip().endswith("ة"))
     if hits:
+        # "ال" لا تدخل إلا على الأسماء: "الظلم" = الاسم ظُلْم لا الفعل ظَلَمَ. بدون هذا
+        # كان الفعل (الأكثر تكرارًا) يُختار، فتأخذ آيات "بظلم/ظلمًا" مطابقة ضعيفة
+        # فقط — وهذا سبب تراجع "الظلم" في التقييم الفعلي.
+        if k.startswith(("ال", "وال", "فال", "بال", "كال", "لل")):
+            nouns = {a: n for a, n in hits.items() if a[3]}
+            if nouns:
+                hits = nouns
         top = max(hits.values())
-        for (r, l, vf), n in hits.items():
+        for (r, l, vf, _noun), n in hits.items():
             if n < 0.25 * top:
                 continue          # تحليل نادر لنفس الحروف (جِنّة مقابل جَنّة) — نتجاهله
             form = vf or _guess_form(lex_key(l or ""), r, lex.root_forms)
@@ -431,15 +472,20 @@ def analyze_query_word(word: str, lex: Lexicon, ignore_stop: bool = False):
                 rules.append(("root_vf", (r, "1"), TIER_MEDIUM))
             rules.append(("root", r, TIER_WEAK))
     elif not concept:
-        # الكلمة غير موجودة في القرآن: نستخرج جذرها بـ ISRI ونقبله فقط إذا كان
-        # جذرًا قرآنيًا. بدون وزن مزيد مؤكد لا نعطي إلا مطابقة ضعيفة، لأن الجذر
-        # وحده ملتبس (مثال: "الأخلاق" ← خلق = الخَلْق).
-        r = lex.root_by_key.get(lex_key(_isri.stem(k))) or lex.root_by_key.get(lex_key(_isri.stem(base)))
+        # الكلمة غير موجودة في القرآن بلفظها (مثل "الطهارة"، والقرآن فيه تطهروا/
+        # طهورًا/المطهرون): نستخرج جذرها بـ ISRI ونقبله إذا كان جذرًا قرآنيًا.
+        # - وزن مزيد مؤكد (تحريم=II، تفكّر=V) ← مطابقة قوية لنفس الوزن.
+        # - جذر محدد (<= FALLBACK_ROOT_MAX_VERSES آية، مثل طهر: 26) ← مطابقة متوسطة
+        #   لكل مشتقاته. قسنا: إعطاؤه مطابقة ضعيفة فقط أنزل "الطهارة" من المرتبة 5
+        #   إلى 45 في التقييم الفعلي.
+        # - جذر واسع (مثل خلق: 250 آية) ← مطابقة ضعيفة فقط، لأنه غالبًا متعدد المعاني.
+        r = _fallback_root(k, base, lex)
         if r:
             form = _guess_form(base, r, lex.root_forms)
             if form and form != "1":
                 rules.append(("root_vf", (r, form), TIER_STRONG))
-            rules.append(("root", r, TIER_WEAK))
+            n_root = len(np.unique(lex.w_verse[lex.by_root[r]]))
+            rules.append(("root", r, TIER_MEDIUM if n_root <= FALLBACK_ROOT_MAX_VERSES else TIER_WEAK))
     if concept:
         rules.extend(concept[1])
     return rules
@@ -791,6 +837,10 @@ def _metrics(ranking: list, gold: set) -> dict:
     }
 
 
+def _top_refs(ranking: list, gold: set, k: int = 10) -> str:
+    return " ".join(f"{s}:{a}{'✓' if (s, a) in gold else '✗'}" for s, a in ranking[:k])
+
+
 def run_benchmark(model, D: SearchData) -> pd.DataFrame:
     rows = []
     for q in GOLD:
@@ -804,7 +854,8 @@ def run_benchmark(model, D: SearchData) -> pd.DataFrame:
                      "old MRR": mo["MRR"], "new MRR": mn["MRR"],
                      "old P@10": mo["P@10"], "new P@10": mn["P@10"],
                      "old R@20": mo["R@20"], "new R@20": mn["R@20"],
-                     "old first hit": mo["first hit"], "new first hit": mn["first hit"]})
+                     "old first hit": mo["first hit"], "new first hit": mn["first hit"],
+                     "new top10": _top_refs(new, gold), "old top10": _top_refs(old, gold)})
     return pd.DataFrame(rows)
 
 
@@ -948,7 +999,8 @@ def main():
             if st.button("Run benchmark", key="run_bench"):
                 with st.spinner("Running..."):
                     bench = run_benchmark(model, D)
-                avg = bench[[c for c in bench.columns if c.startswith(("old", "new")) and "hit" not in c]].mean()
+                metric_cols = [f"{v} {m}" for v in ("old", "new") for m in ("MRR", "P@10", "R@20")]
+                avg = bench[metric_cols].astype(float).mean()
                 c1, c2, c3 = st.columns(3)
                 c1.metric("MRR", f"{avg['new MRR']:.3f}", f"{avg['new MRR'] - avg['old MRR']:+.3f}")
                 c2.metric("P@10", f"{avg['new P@10']:.3f}", f"{avg['new P@10'] - avg['old P@10']:+.3f}")
