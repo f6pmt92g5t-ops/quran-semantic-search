@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://f6pmt92g5t-ops.github.io/quran-semantic-search/sitemap.xml

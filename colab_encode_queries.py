@@ -27,7 +27,7 @@ from sentence_transformers import SentenceTransformer  # noqa: E402
 
 def main():
     queries = []
-    for name in ("test_queries.txt", "test_queries2.txt", "test_queries3.txt"):
+    for name in ("test_queries.txt", "test_queries2.txt", "test_queries3.txt", "test_queries_en.txt"):
         try:
             queries += [q.strip() for q in open(name, encoding="utf-8") if q.strip()]
         except FileNotFoundError:
