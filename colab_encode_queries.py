@@ -33,7 +33,8 @@ def main():
         except FileNotFoundError:
             pass
     queries += [line.split("\t")[0].strip() for line in open("test_fragments.tsv", encoding="utf-8") if line.strip()]
-    texts = list(dict.fromkeys(app.normalize_arabic(q) for q in queries))   # نفس ما يفعله الموقع قبل الترميز
+    # النص كما يرمّزه الموقع: الاستعلام كاملًا، والنسخة المنظّفة من كلمات صياغة السؤال (semantic_text)
+    texts = list(dict.fromkeys([app.normalize_arabic(q) for q in queries] + [app.semantic_text(q) for q in queries]))
     model = SentenceTransformer(app.MODEL_NAME)
     vecs = model.encode(texts, batch_size=64, show_progress_bar=True).astype(np.float16)
     np.savez_compressed("query_vectors.npz", texts=np.array(texts), vectors=vecs)
