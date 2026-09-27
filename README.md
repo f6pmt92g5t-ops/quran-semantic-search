@@ -8,13 +8,17 @@ Graduation project, B.Sc. Data Science and Analytics, Onaizah Colleges (1447–1
 
 ## What the app does
 
-| Tab | What it does |
-|---|---|
-| **Text Search** | Every verse containing a word from the same Arabic root as the query word. Exact words and close derivatives are listed first. |
-| **Semantic Search** | Hybrid ranking: `score = S(v) + 0.7 × L(v)` — semantic similarity from a fine-tuned embedding model plus a graded word-match score from the Quranic Arabic Corpus morphology. Shows the matched words for each verse. |
-| **Evaluation** (sidebar checkbox) | Runs the 16-query benchmark and compares the previous ranking (v2, ISRI stemmer) with the final one (v3). |
+One search box with suggestions as you type, ready-made topic chips, and two modes:
 
-Every tab can export the full ranked list to Excel.
+| Mode | What it does |
+|---|---|
+| **By meaning and topic** (default) | Hybrid ranking: `score = S(v) + 0.7 × L(v)` — semantic similarity from a fine-tuned embedding model plus a graded word-match score from the Quranic Arabic Corpus morphology, plus a topical index of core verses. |
+| **By word and root** | Every verse containing a word from the same Arabic root as the query word. Exact words and close derivatives are listed first. |
+
+Each verse card has: recitation (Mishary Alafasy, EveryAyah), copy, share, Tafsir al-Muyassar, and the
+surrounding verses. Clicking any word shows its root, lemma and how many verses use that root, with a link to
+all of them. Results can be limited to chosen surahs or a juz, links are shareable (`?q=...&m=word`), and the
+full list exports to Excel. The developer benchmark opens with `?dev=1`.
 
 ## How it works
 
@@ -38,7 +42,8 @@ Every tab can export the full ranked list to Excel.
 |---|---|---|---|
 | Semantic similarity only | 0.622 | 0.362 | 0.180 |
 | v2: hybrid + ISRI stemmer | 0.762 | 0.619 | 0.374 |
-| **v3: hybrid + Quranic Arabic Corpus (final)** | **0.953** | **0.788** | **0.519** |
+| v3: hybrid + Quranic Arabic Corpus | 0.953 | 0.788 | 0.519 |
+| **v3 + topical index (final, deployed)** | **1.000** | **0.812** | **0.524** |
 
 Details, per-query results and the comparison with multilingual-e5 and BGE-M3 are in Chapter Five of the report.
 
@@ -50,6 +55,7 @@ Details, per-query results and the comparison with multilingual-e5 and BGE-M3 ar
 | `verses.csv` | 6,236 verses: `sura, aya, text`. |
 | `segments.csv` | 10,675 Tajweed segments: `sura, aya, part_num, text`. |
 | `segment_embeddings.npy` | Embeddings of the segments, shape (10675, 768), float16. Must match `segments.csv` row for row. |
+| `tafsir_muyassar.csv` | Tafsir al-Muyassar (King Fahd Complex), one row per verse: `sura, aya, tafsir`. |
 | `quran-morphology.txt` | Quranic Arabic Corpus morphology v0.4 (Dukes & Habash 2010, GNU GPL; Arabic-script edition by [mustafa0x/quran-morphology](https://github.com/mustafa0x/quran-morphology)). |
 | `requirements.txt` | Python packages. |
 | `colab_compare_models.py` | Colab script: compares embedding models on the benchmark. |

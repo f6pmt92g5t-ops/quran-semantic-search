@@ -1638,6 +1638,12 @@ def load_data() -> SearchData:
     verses_df["text_original"] = verses_df["text"]
     first = (verses_df.aya == 1) & (verses_df.sura != 1) & verses_df.text.str.startswith(basmala)
     verses_df.loc[first, "text"] = verses_df.loc[first, "text"].str[len(basmala):].str.strip()
+    # صيغة أخرى للبسملة (بِّسْمِ بشدّة) في أول سورتي التين والقدر
+    bkey = lex_key(basmala)
+    for i in verses_df.index[(verses_df.aya == 1) & (verses_df.sura != 1)]:
+        words = verses_df.at[i, "text"].split()
+        if len(words) > 4 and lex_key(" ".join(words[:4])) == bkey:
+            verses_df.at[i, "text"] = " ".join(words[4:])
     D.verses = verses_df.reset_index(drop=True)
     n = len(D.verses)
     vidx = {(int(s), int(a)): i for i, (s, a) in enumerate(zip(D.verses.sura, D.verses.aya))}
@@ -1679,7 +1685,56 @@ def load_data() -> SearchData:
     D.text_key = D.verses["text"].apply(lex_key).to_numpy()   # لدمج الآيات المتطابقة نصًا
     # كلمات كل آية بعد التوحيد وحذف السوابق: لترتيب "الكلمة نفسها أولًا" في البحث النصي
     D.word_sets = [{_strip_article(lex_key(w)) for w in t.split()} for t in D.verses["text"]]
+    D.vidx = vidx
+    add_reader_data(D, vidx)
     return D
+
+
+# ---------------------------------------------------------------------------
+# بيانات القارئ: التفسير الميسر، الأجزاء، جذر كل كلمة (للبطاقات)
+# ---------------------------------------------------------------------------
+JUZ_STARTS = [(1, 1), (2, 142), (2, 253), (3, 93), (4, 24), (4, 148), (5, 82), (6, 111), (7, 88), (8, 41),
+              (9, 93), (11, 6), (12, 53), (15, 1), (17, 1), (18, 75), (21, 1), (23, 1), (25, 21), (27, 56),
+              (29, 46), (33, 31), (36, 28), (39, 32), (41, 47), (46, 1), (51, 31), (58, 1), (67, 1), (78, 1)]
+_POS_AR = {"V": "فعل", "N": "اسم", "PN": "اسم علم", "ADJ": "صفة"}
+_LETTER = re.compile("[\u0621-\u064A\u0671]")
+
+
+def add_reader_data(D: SearchData, vidx: dict):
+    keys = list(zip(D.verses.sura.astype(int), D.verses.aya.astype(int)))
+    starts = [vidx[k] for k in JUZ_STARTS]
+    D.juz = np.searchsorted(starts, np.arange(D.n), side="right")
+    path = os.path.join(BASE_DIR, "tafsir_muyassar.csv")
+    D.tafsir = {}
+    if os.path.exists(path):
+        t = pd.read_csv(path)
+        D.tafsir = {(int(a), int(b)): str(c) for a, b, c in zip(t.sura, t.aya, t.tafsir)}
+    # لكل كلمة: الجذر والأصل (lemma) ونوعها، من مدوّنة القرآن الصرفية
+    words, root_verses = {}, {}
+    with open(MORPH_FILE, encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            loc = parts[0].split(":")
+            if len(loc) != 4 or len(parts) < 4:
+                continue
+            k, w = (int(loc[0]), int(loc[1])), int(loc[2])
+            feats = parts[3].split("|")
+            root = next((x[5:] for x in feats if x.startswith("ROOT:")), "")
+            lem = next((x[4:] for x in feats if x.startswith("LEM:")), "")
+            is_affix = "PREF" in feats or "SUFF" in feats or feats[0].endswith(("PREF", "SUFF"))
+            cur = words.setdefault(k, {}).get(w)
+            if root or (cur is None and not is_affix):
+                pos = "PN" if "PN" in feats else parts[2]
+                words[k][w] = (root, lem, _POS_AR.get(pos, "حرف"))
+            if root:
+                root_verses.setdefault(root, set()).add(k)
+    D.words = []
+    for k, text in zip(keys, D.verses.text):
+        n_letters = sum(1 for tok in text.split() if _LETTER.search(tok))
+        ws = words.get(k, {})
+        D.words.append([ws.get(i + 1, ("", "", "")) for i in range(n_letters)] if len(ws) == n_letters else None)
+    # عدد الآيات بعد دمج المتطابقة نصًا، ليساوي عدد نتائج "البحث بالكلمة"
+    D.root_count = {r: len({D.text_key[vidx[k]] for k in v if k in vidx}) for r, v in root_verses.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -1853,57 +1908,201 @@ def run_benchmark(model, D: SearchData) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# UI helpers
-# ---------------------------------------------------------------------------
+_STAR = ("<svg viewBox='0 0 48 48' width='22' height='22' aria-hidden='true'><g fill='none' stroke='currentColor' "
+         "stroke-width='2'><rect x='12' y='12' width='24' height='24'/><rect x='12' y='12' width='24' height='24' "
+         "transform='rotate(45 24 24)'/></g><circle cx='24' cy='24' r='3' fill='currentColor'/></svg>")
+_PATTERN = ("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E"
+            "%3Cg fill='none' stroke='%23a8843f' stroke-opacity='.16' stroke-width='1'%3E"
+            "%3Crect x='18' y='18' width='20' height='20'/%3E%3Crect x='18' y='18' width='20' height='20' transform='rotate(45 28 28)'/%3E"
+            "%3Cpath d='M0 28h8M48 28h8M28 0v8M28 48v8'/%3E%3C/g%3E%3C/svg%3E")
+
 CUSTOM_CSS = """
-<link href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;600&family=Amiri:wght@400;700&family=Noto+Kufi+Arabic:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-    :root { --ink:#1f2a24; --muted:#6b756f; --line:#e4e7e2; --paper:#fbfaf6; --brand:#1d5c45; --brand-soft:#e8f1ec; --gold:#b08d3e; }
-    html, body, [class*="css"], .stMarkdown, .stTextInput input, .stTabs button, .stCaption, .stAlert {
-        font-family: "Noto Kufi Arabic", Tahoma, sans-serif !important; }
-    .main .block-container { direction: rtl; text-align: right; max-width: 860px; }
-    .stTextInput input { direction: rtl; text-align: right; font-size: 1.05rem; padding: .7rem .9rem; border-radius: 12px; }
-    .stTabs [data-baseweb="tab-list"] { direction: rtl; gap: .25rem; }
-    .stTabs [data-baseweb="tab"] { font-weight: 600; }
-    .app-header { text-align: center; padding: 1.2rem 0 1.4rem; border-bottom: 1px solid var(--line); margin-bottom: 1rem; }
-    .app-header .mark { font-family: "Amiri", serif; color: var(--gold); font-size: 1.6rem; line-height: 1; }
-    .app-header h1 { font-size: 2rem; font-weight: 700; color: var(--brand); margin: .35rem 0 .3rem; }
-    .app-header p { color: var(--muted); font-size: .95rem; margin: 0; }
-    .count { color: var(--muted); font-size: .9rem; margin: .4rem 0 .8rem; }
-    .verse-card { background: var(--paper); border: 1px solid var(--line); border-radius: 14px;
-                  padding: .9rem 1.1rem 1rem; margin-bottom: .75rem; direction: rtl; }
-    .verse-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem;
-                  font-size: .85rem; color: var(--muted); margin-bottom: .45rem; }
-    .verse-ref { font-weight: 700; color: var(--brand); }
-    .verse-score { background: var(--brand-soft); color: var(--brand); border-radius: 999px; padding: .1rem .6rem;
-                   font-size: .78rem; font-weight: 600; white-space: nowrap; }
-    .verse-text { font-family: "Noto Naskh Arabic", "Amiri", serif; font-size: 1.6rem; line-height: 2.7rem; color: var(--ink); }
-    .ayah-num { display: inline-block; min-width: 1.9rem; height: 1.9rem; line-height: 1.9rem; text-align: center;
-                border: 1.5px solid var(--gold); border-radius: 50%; font-size: .95rem; color: var(--gold);
-                font-family: "Noto Kufi Arabic", sans-serif; margin-right: .35rem; vertical-align: middle; }
-    .stMarkdown, [data-testid="stCaptionContainer"], .count, .stAlert, .stCheckbox, [data-testid="stExpander"] {
-        direction: rtl; text-align: right; }
-    .verse-text mark { background: #f3e7c6; color: inherit; border-radius: 4px; padding: 0 .1rem; }
-    .verse-foot { margin-top: .5rem; font-size: .8rem; color: var(--muted); }
-    .chip { display: inline-block; background: #fff; border: 1px solid var(--line); border-radius: 999px;
-            padding: .05rem .55rem; margin: .1rem 0 .1rem .3rem; font-size: .8rem; color: var(--ink); }
-    @media (prefers-color-scheme: dark) {
-        :root { --ink:#eef1ec; --muted:#a3ada6; --line:#34403a; --paper:#18201c; --brand:#7cc4a4; --brand-soft:#223a30; }
-        .verse-text mark { background: #4a3f22; } .chip { background: #111713; }
-    }
-    /* إخفاء أدوات Streamlit الخاصة بالمطوّر عن المستخدم (القائمة، زر Deploy، الشريط العلوي، التذييل) */
-    #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"],
-    [data-testid="stStatusWidget"], [data-testid="stAppDeployButton"], .stDeployButton,
-    [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] { display: none !important; }
-    header[data-testid="stHeader"] { background: transparent; height: 0; }
-    .block-container { padding-top: 1.5rem; }
+  @import url("https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Noto+Naskh+Arabic:wght@400;600&family=Noto+Kufi+Arabic:wght@400;500;700&display=swap");
+  :root { --ink:#1e2622; --muted:#6f6a5e; --line:#e3d8bf; --paper:#fffdf7; --bg:#f7f2e6;
+          --green:#17503b; --green-2:#236b50; --gold:#a8843f; --gold-soft:#efe3c4; --mark:#f4e6bf; }
+  html, body, .stApp, [class*="css"], .stMarkdown, button, input, textarea, [data-baseweb] {
+      font-family: "Noto Kufi Arabic", Tahoma, sans-serif !important; }
+  .stApp { background: var(--bg) url("PATTERN") repeat; }
+  .main .block-container, [data-testid="stMainBlockContainer"] { direction: rtl; text-align: right; max-width: 880px;
+      padding-top: 1.2rem !important; padding-bottom: 3rem; }
+  .stMarkdown, [data-testid="stCaptionContainer"], .stAlert, [data-testid="stExpander"], [data-testid="stWidgetLabel"],
+  [data-testid="stSelectbox"], [data-testid="stMultiSelect"], [data-testid="stPills"], [data-testid="stSegmentedControl"] {
+      direction: rtl; text-align: right; }
+  /* الترويسة */
+  .hero { position: relative; text-align: center; margin: 0 0 1.4rem; padding: 2.1rem 1.2rem 1.6rem;
+          background: linear-gradient(180deg, #1b5a43 0%, #123d2e 100%); border-radius: 22px; color: #f6efdc;
+          box-shadow: 0 10px 30px -18px rgba(18,61,46,.8); overflow: hidden; }
+  .hero::before { content: ""; position: absolute; inset: 0; background: url("PATTERN_LIGHT") repeat; opacity: .9; }
+  .hero::after { content: ""; position: absolute; inset: 9px; border: 1px solid rgba(214,184,120,.55); border-radius: 16px;
+                 pointer-events: none; }
+  .hero > * { position: relative; }
+  .hero .verse { font-family: "Amiri", serif; color: #e2c47f; font-size: 1.35rem; }
+  .hero h1 { font-family: "Amiri", serif !important; font-weight: 700; font-size: 2.9rem; line-height: 1.3;
+             color: #fbf5e4; margin: .2rem 0 .1rem; padding: 0; }
+  .hero p { color: #d9ccaa; font-size: .95rem; margin: .2rem 0 0; }
+  .orn { display: flex; align-items: center; gap: .7rem; color: var(--gold); margin: 1.2rem 0 .9rem; }
+  .orn::before, .orn::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--gold), transparent); }
+  .hero .orn { color: #d8b86f; margin: .7rem auto .5rem; max-width: 320px; }
+  .hero .orn::before, .hero .orn::after { background: linear-gradient(90deg, transparent, #d8b86f, transparent); }
+  /* مربع البحث */
+  [data-testid="stSelectbox"] [role="group"] { min-height: 58px; border-radius: 16px !important;
+      border: 1.5px solid var(--gold) !important; background: var(--paper) !important;
+      box-shadow: 0 6px 18px -12px rgba(120,90,30,.55); padding-right: .6rem; }
+  [data-testid="stSelectbox"] [role="group"]:focus-within { box-shadow: 0 0 0 3px rgba(168,132,63,.25); }
+  [data-testid="stSelectbox"] input { font-size: 1.12rem !important; direction: rtl; text-align: right; }
+  [role="listbox"], [role="option"] { direction: rtl; text-align: right; }
+  [data-testid="stButtonGroup"] button { border-radius: 999px !important; border: 1px solid var(--line) !important;
+      background: var(--paper) !important; color: var(--green) !important; }
+  [data-testid="stButtonGroup"] button:hover { border-color: var(--gold) !important; }
+  [data-testid="stButtonGroup"] button[data-selected="true"] { background: var(--green) !important;
+      color: #fbf5e4 !important; border-color: var(--green) !important; }
+  [data-testid="stButtonGroup"] button[data-variant="segmented_control"] { border-radius: 0 !important; }
+  [data-testid="stButtonGroup"] button[data-variant="segmented_control"]:first-of-type { border-radius: 0 999px 999px 0 !important; }
+  [data-testid="stButtonGroup"] button[data-variant="segmented_control"]:last-of-type { border-radius: 999px 0 0 999px !important; }
+  [data-testid="stPopover"] button, .stDownloadButton button, .stButton button { border-radius: 999px !important;
+      border: 1px solid var(--line) !important; background: var(--paper) !important; color: var(--green) !important; }
+  [data-testid="stExpander"] details { background: var(--paper); border: 1px solid var(--line) !important; border-radius: 14px !important; }
+  .sec-title { font-size: .85rem; color: var(--muted); margin: .9rem 0 .35rem; }
+  .count { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .4rem; color: var(--muted);
+           font-size: .9rem; margin: .2rem 0 .8rem; }
+  .count b { color: var(--green); }
+  /* بطاقة الآية */
+  .verse-card { position: relative; background: var(--paper); border: 1px solid var(--line); border-radius: 18px;
+                padding: 1.1rem 1.35rem .8rem; margin-bottom: 1rem; direction: rtl;
+                box-shadow: inset 0 0 0 5px var(--paper), inset 0 0 0 6px var(--gold-soft), 0 8px 22px -20px rgba(80,60,20,.7); }
+  .verse-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin-bottom: .35rem; }
+  .verse-ref { font-weight: 700; color: var(--green); font-size: .95rem; }
+  .verse-ref .sep { color: var(--gold); margin: 0 .45rem; font-size: .55rem; vertical-align: middle; }
+  .juz { color: var(--gold); font-size: .78rem; border: 1px solid var(--gold-soft); border-radius: 999px; padding: .05rem .6rem; }
+  .verse-text { font-family: "Amiri", "Noto Naskh Arabic", serif; font-size: 1.85rem; line-height: 3.1rem; color: var(--ink);
+                text-align: justify; text-align-last: right; }
+  .vw { cursor: pointer; border-radius: 6px; transition: background .15s; }
+  .vw:hover { background: rgba(168,132,63,.14); }
+  .vw.hl { background: var(--mark); box-shadow: 0 2px 0 var(--gold-soft); }
+  .ayah-num { display: inline-flex; align-items: center; justify-content: center; width: 2.1rem; height: 2.1rem;
+              margin: 0 .3rem; vertical-align: middle; color: var(--green); font-size: .95rem;
+              font-family: "Noto Kufi Arabic", sans-serif; position: relative; }
+  .ayah-num::before { content: ""; position: absolute; inset: 2px; border: 1.5px solid var(--gold); transform: rotate(45deg); border-radius: 4px; }
+  .ayah-num::after { content: ""; position: absolute; inset: 2px; border: 1.5px solid var(--gold); border-radius: 4px; }
+  .verse-foot { font-size: .8rem; color: var(--muted); margin-top: .2rem; }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-top: .6rem;
+             padding-top: .6rem; border-top: 1px dashed var(--line); }
+  .act, .actions summary { font-family: "Noto Kufi Arabic", sans-serif; font-size: .8rem; color: var(--green);
+          background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: .22rem .75rem;
+          cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: .3rem; line-height: 1.5; }
+  .actions summary::-webkit-details-marker { display: none; }
+  .act:hover, .actions summary:hover { background: var(--gold-soft); border-color: var(--gold); }
+  .act.playing { background: var(--green); color: #fbf5e4; border-color: var(--green); }
+  .actions details[open] { flex-basis: 100%; order: 10; }
+  .actions details[open] summary { background: var(--gold-soft); border-color: var(--gold); }
+  .panel { margin-top: .55rem; background: #fbf6ea; border-radius: 12px; padding: .75rem 1rem; font-size: .95rem;
+           line-height: 2rem; color: var(--ink); border-right: 3px solid var(--gold); }
+  .panel .src { display: block; color: var(--muted); font-size: .75rem; margin-top: .3rem; }
+  .ctx { font-family: "Amiri", serif; font-size: 1.3rem; line-height: 2.4rem; color: #5b574c; }
+  .ctx.cur { color: var(--ink); font-weight: 700; }
+  .ctx small { font-family: "Noto Kufi Arabic", sans-serif; font-size: .72rem; color: var(--gold); margin-right: .3rem; }
+  /* آية اليوم */
+  .daily { text-align: center; }
+  .daily .label { display: inline-block; color: var(--gold); font-size: .8rem; letter-spacing: .02em; margin-bottom: .3rem; }
+  .daily .verse-text { text-align: center; text-align-last: center; font-size: 2rem; }
+  /* النافذة المنبثقة لجذر الكلمة، والتنبيه */
+  #qs-pop { position: fixed; z-index: 100000; display: none; min-width: 210px; max-width: 280px; direction: rtl;
+            text-align: right; background: #fffdf7; border: 1px solid var(--gold); border-radius: 14px; padding: .8rem 1rem;
+            box-shadow: 0 16px 40px -18px rgba(40,30,10,.55); font-family: "Noto Kufi Arabic", sans-serif; }
+  #qs-pop.on { display: block; }
+  #qs-pop .pl { font-family: "Amiri", serif; font-size: 1.7rem; color: var(--green); line-height: 2.2rem; }
+  #qs-pop .pr { font-size: .9rem; color: var(--ink); margin: .15rem 0; }
+  #qs-pop .pr b { color: var(--gold); letter-spacing: .3em; font-size: 1.05rem; }
+  #qs-pop .pm { font-size: .78rem; color: var(--muted); }
+  #qs-pop button { margin-top: .55rem; width: 100%; font-family: inherit; font-size: .8rem; color: #fbf5e4; background: var(--green);
+                   border: 0; border-radius: 999px; padding: .35rem .6rem; cursor: pointer; }
+  #qs-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); opacity: 0;
+              background: var(--green); color: #fbf5e4; padding: .5rem 1.1rem; border-radius: 999px; font-size: .85rem;
+              font-family: "Noto Kufi Arabic", sans-serif; transition: all .25s; z-index: 100001; pointer-events: none; }
+  #qs-toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .site-foot { text-align: center; color: var(--muted); font-size: .78rem; margin-top: 2rem; line-height: 1.9; }
+  @media (max-width: 640px) {
+      .hero h1 { font-size: 2.2rem; } .verse-text { font-size: 1.55rem; line-height: 2.7rem; }
+      .verse-card { padding: .9rem 1rem .7rem; }
+  }
+  /* إخفاء أدوات Streamlit الخاصة بالمطوّر عن المستخدم */
+  #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"],
+  [data-testid="stAppDeployButton"], .stDeployButton, [data-testid="collapsedControl"],
+  [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+  header[data-testid="stHeader"] { background: transparent; height: 0; }
 </style>
+""".replace("PATTERN_LIGHT", _PATTERN.replace("%23a8843f", "%23e2c47f").replace(".16", ".22")).replace("PATTERN", _PATTERN)
+
+# سلوك أزرار البطاقات (نسخ، مشاركة، استماع، جذر الكلمة). يُحقن في صفحة التطبيق نفسها مرة واحدة.
+_PAGE_JS = r"""
+(function () {
+  if (window.__qsReady) return; window.__qsReady = 1;
+  const d = document;
+  const el = (id) => { let e = d.getElementById(id); if (!e) { e = d.createElement('div'); e.id = id; d.body.appendChild(e); } return e; };
+  const toast = (m) => { const t = el('qs-toast'); t.textContent = m; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 1700); };
+  const copy = (txt) => {
+    const fb = () => { const a = d.createElement('textarea'); a.value = txt; a.style.position = 'fixed'; a.style.opacity = '0';
+                       d.body.appendChild(a); a.select(); try { d.execCommand('copy'); } catch (e) {} a.remove(); };
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).catch(fb); else fb();
+    toast('تم نسخ الآية');
+  };
+  let audio = null, audioBtn = null;
+  const stop = () => { if (audio) { audio.pause(); audio = null; }
+    if (audioBtn) { audioBtn.classList.remove('playing'); audioBtn.querySelector('span').textContent = 'استماع'; audioBtn = null; } };
+  const hide = () => el('qs-pop').classList.remove('on');
+  const esc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  d.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]');
+    if (b) {
+      e.preventDefault(); const a = b.dataset.act;
+      if (a === 'copy') copy(b.dataset.text);
+      else if (a === 'share') {
+        if (navigator.share) navigator.share({ text: b.dataset.text }).catch(() => {});
+        else window.open('https://wa.me/?text=' + encodeURIComponent(b.dataset.text), '_blank');
+      } else if (a === 'play') {
+        if (audioBtn === b) { stop(); return; }
+        stop(); audio = new Audio(b.dataset.src); audioBtn = b; b.classList.add('playing');
+        b.querySelector('span').textContent = 'إيقاف';
+        audio.onended = stop;
+        audio.play().catch(() => { stop(); toast('تعذّر تشغيل التلاوة'); });
+      } else if (a === 'go') {
+        const u = new URL(window.location.href); u.searchParams.set('q', b.dataset.q); u.searchParams.set('m', 'word');
+        window.location.href = u.toString();
+      }
+      return;
+    }
+    const w = e.target.closest('.vw');
+    if (w && w.dataset.lem) {
+      const p = el('qs-pop');
+      let h = '<div class="pl">' + esc(w.dataset.lem) + '</div>';
+      if (w.dataset.root) h += '<div class="pr">الجذر: <b>' + esc(w.dataset.root) + '</b></div>';
+      h += '<div class="pm">' + esc(w.dataset.pos) + (w.dataset.n ? ' · ورد جذرها في ' + esc(w.dataset.n) + ' آية' : '') + '</div>';
+      if (w.dataset.root) h += '<button data-act="go" data-q="' + esc(w.dataset.q) + '">كل الآيات من هذا الجذر</button>';
+      p.innerHTML = h; p.classList.add('on');
+      const r = w.getBoundingClientRect(), pw = p.offsetWidth, ph = p.offsetHeight;
+      let left = Math.min(Math.max(8, r.left + r.width / 2 - pw / 2), window.innerWidth - pw - 8);
+      let top = r.bottom + 8; if (top + ph > window.innerHeight - 8) top = r.top - ph - 8;
+      p.style.left = left + 'px'; p.style.top = top + 'px';
+      return;
+    }
+    if (!e.target.closest('#qs-pop')) hide();
+  });
+  d.addEventListener('scroll', hide, true);
+})();
 """
 
 
-# ملف Excel لكل النتائج (~6000 صف) يأخذ حوالي ثانية؛ نخزّنه حتى لا يُعاد بناؤه
-# مع كل تفاعل في الصفحة (تبديل تبويب، ضغط مربع اختيار...).
+def inject_page_js():
+    # عنصر مخفي مع السكربت: لو كان السكربت وحده لعامله Streamlit كتنسيق فقط ولم يشغّله
+    # و"<" داخل السكربت تُكتب \x3c: منقّي HTML يحذف أي سكربت في نصه وسوم
+    st.html('<span style="display:none"></span><script>' + _PAGE_JS.replace("<", "\\x3c") + "</script>",
+            unsafe_allow_javascript=True)
+
+
+# ---------------------------------------------------------------------------
+# UI helpers
+# ---------------------------------------------------------------------------
 @st.cache_data(max_entries=64, show_spinner=False)
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     buffer = io.BytesIO()
@@ -1919,47 +2118,96 @@ def _sura_name(n: int) -> str:
 _AR_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 
 
-def _highlight(text: str, matched: str) -> str:
-    """يظلّل الكلمة كاملة (لا جزءًا منها، حتى لا ينكسر اتصال الحروف)."""
-    import html as _html
-    keys = {_strip_article(lex_key(w)) for w in str(matched or "").split("،") if w.strip()}
-    keys |= {lex_key(w) for w in str(matched or "").split("،") if w.strip()}
-    out = []
-    for tok in str(text).split():
+def _ar(n) -> str:
+    return str(n).translate(_AR_DIGITS)
+
+
+def _display_word(tok: str) -> str:
+    # ألف الوصل وبعض علامات الضبط الصغيرة (۟ ۢ ۥ ۦ) لا تُرسم في خطوط الويب فتترك فراغًا
+    return re.sub("[۟۠ۡۢۥۦۭ]", "", tok.replace("ٱ", "ا"))
+
+
+def _display_text(text: str) -> str:
+    return " ".join(_display_word(t) for t in str(text).split())
+
+
+def _verse_html(D, i: int, matched: str = "") -> str:
+    """نص الآية: كل كلمة قابلة للضغط (جذرها وأصلها)، والكلمات المطابقة للبحث مظلّلة."""
+    import html as _h
+    keys = set()
+    for w in str(matched or "").split("،"):
+        if w.strip():
+            keys |= {lex_key(w), _strip_article(lex_key(w))}
+    info = D.words[i] or []
+    out, wi = [], 0
+    for tok in str(D.verses.text[i]).split():
+        esc = _h.escape(_display_word(tok))
+        if not _LETTER.search(tok):
+            out.append(esc)
+            continue
         k = lex_key(tok)
-        # ألف الوصل وبعض علامات الضبط الصغيرة (۟ ۢ ۥ ۦ) لا تُرسم في خطوط الويب فتترك فراغًا
-        esc = _html.escape(re.sub("[\u06DF\u06E0\u06E1\u06E2\u06E5\u06E6\u06ED]", "", tok.replace("ٱ", "ا")))
-        out.append(f"<mark>{esc}</mark>" if k and (k in keys or _strip_article(k) in keys) else esc)
+        cls = "vw hl" if k and (k in keys or _strip_article(k) in keys) else "vw"
+        attrs = ""
+        if wi < len(info):
+            root, lem, pos = info[wi]
+            attrs = (f' data-lem="{_h.escape(_display_word(lem) or _display_word(tok))}" data-pos="{pos}"'
+                     f' data-q="{_h.escape(normalize_arabic(tok))}"')
+            if root:
+                attrs += f' data-root="{_h.escape(" ".join(root))}" data-n="{_ar(D.root_count.get(root, 0))}"'
+        wi += 1
+        out.append(f'<span class="{cls}"{attrs}>{esc}</span>')
     return " ".join(out)
 
 
-def render_results_table(df: pd.DataFrame, score_label: str, height: int = 700):
-    """بطاقة لكل آية: السورة والآية، النص بخط المصحف مع تظليل الكلمات المطابقة، والدرجة."""
-    import html as _html
-    cards = []
-    for _, r in df.head(RESULTS_SHOWN).iterrows():
-        sura, aya = int(r["sura"]), int(r["aya"])
-        chips = "".join(f'<span class="chip">{_html.escape(w.strip())}</span>'
-                        for w in str(r.get("matched", "") or "").split("،") if w.strip())
-        foot = f"الكلمات المطابقة: {chips}" if chips else ""
-        also = str(r.get("also", "") or "")
-        if also:
-            foot += f'{" · " if foot else ""}النص نفسه أيضًا في: {_html.escape(also)}'
-        cards.append(
-            f'<div class="verse-card"><div class="verse-head">'
-            f'<span class="verse-ref">سورة {_sura_name(sura)} · الآية {aya}</span>'
-            f'<span class="verse-score">{score_label} {float(r["score"]):.2f}</span></div>'
-            f'<div class="verse-text">{_highlight(str(r["text"]), r.get("matched", ""))}'
-            f'<span class="ayah-num">{str(aya).translate(_AR_DIGITS)}</span></div>'
-            + (f'<div class="verse-foot">{foot}</div>' if foot else "") + "</div>")
-    st.markdown("".join(cards), unsafe_allow_html=True)
+_ICON = {
+    "play": "<svg width='13' height='13' viewBox='0 0 24 24' fill='currentColor'><path d='M8 5v14l11-7z'/></svg>",
+    "copy": "<svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><rect x='9' y='9' width='11' height='11' rx='2'/><path d='M5 15V5a2 2 0 0 1 2-2h8'/></svg>",
+    "share": "<svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><circle cx='18' cy='5' r='3'/><circle cx='6' cy='12' r='3'/><circle cx='18' cy='19' r='3'/><path d='M8.6 13.5l6.8 4M15.4 6.5l-6.8 4'/></svg>",
+    "book": "<svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M4 19.5V5a2 2 0 0 1 2-2h14v16H6.5A2.5 2.5 0 0 0 4 21.5z'/></svg>",
+    "list": "<svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'><path d='M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01'/></svg>",
+}
+
+
+def verse_card(D, i: int, matched: str = "", also: str = "", label: str = "") -> str:
+    import html as _h
+    s, a = int(D.verses.sura[i]), int(D.verses.aya[i])
+    name = _sura_name(s)
+    plain = _display_text(D.verses.text[i])
+    ref_txt = f"[{name}: {a}]"
+    copy_txt = f"﴿{plain}﴾ {ref_txt}"
+    tafsir = D.tafsir.get((s, a), "")
+    ctx = []
+    for aa in (a - 1, a, a + 1):
+        j = D.vidx.get((s, aa))
+        if j is not None:
+            ctx.append(f'<div class="ctx{" cur" if aa == a else ""}">{_h.escape(_display_text(D.verses.text[j]))}'
+                       f'<small>({_ar(aa)})</small></div>')
+    actions = (
+        f'<button class="act" data-act="play" data-src="https://everyayah.com/data/Alafasy_128kbps/{s:03d}{a:03d}.mp3">'
+        f'{_ICON["play"]}<span>استماع</span></button>'
+        f'<button class="act" data-act="copy" data-text="{_h.escape(copy_txt)}">{_ICON["copy"]}<span>نسخ</span></button>'
+        f'<button class="act" data-act="share" data-text="{_h.escape(copy_txt)}">{_ICON["share"]}<span>مشاركة</span></button>'
+        + (f'<details><summary>{_ICON["book"]}التفسير</summary><div class="panel">{_h.escape(tafsir)}'
+           f'<span class="src">التفسير الميسر — مجمع الملك فهد لطباعة المصحف الشريف</span></div></details>' if tafsir else "")
+        + f'<details><summary>{_ICON["list"]}السياق</summary><div class="panel">{"".join(ctx)}</div></details>')
+    foot = f'<div class="verse-foot">النص نفسه أيضًا في: {_h.escape(also)}</div>' if also else ""
+    head_left = f'<span class="juz">{label or "الجزء " + _ar(int(D.juz[i]))}</span>'
+    return (f'<div class="verse-card"><div class="verse-head"><span class="verse-ref">سورة {name}'
+            f'<span class="sep">◆</span>الآية {_ar(a)}</span>{head_left}</div>'
+            f'<div class="verse-text">{_verse_html(D, i, matched)}<span class="ayah-num">{_ar(a)}</span></div>'
+            f'{foot}<div class="actions">{actions}</div></div>')
+
+
+def render_results(df: pd.DataFrame, D, limit: int):
+    st.markdown("".join(verse_card(D, int(r.vidx), r.get("matched", ""), r.get("also", ""))
+                        for _, r in df.head(limit).iterrows()), unsafe_allow_html=True)
 
 
 def download_button(df: pd.DataFrame, cols: list, name: str, key: str):
     export = df.copy()
     export.insert(0, "Ref", [f"{s}:{a}" for s, a in zip(export["sura"], export["aya"])])
     st.download_button(
-        label=f"تحميل كل النتائج ({len(export)}) — Excel",
+        label=f"تحميل النتائج ({len(export)}) — Excel",
         data=to_excel_bytes(export[["Ref"] + [c for c in cols if c in export.columns]]),
         file_name=f"{name}_results.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1967,112 +2215,187 @@ def download_button(df: pd.DataFrame, cols: list, name: str, key: str):
     )
 
 
-# ---------------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------------
 def has_arabic(text: str) -> bool:
     """استعلام بلا أي حرف عربي (hello، 123، رموز) لا معنى للبحث به في النص القرآني."""
-    return re.search(r"[\u0621-\u064A]", text) is not None
+    return re.search(r"[ء-ي]", text) is not None
 
 
+# ---------------------------------------------------------------------------
+# الاقتراحات أثناء الكتابة، والمواضيع الجاهزة، وآية اليوم
+# ---------------------------------------------------------------------------
+FEATURED_TOPICS = ["الصبر على البلاء", "التوكل على الله", "بر الوالدين", "الرزق", "التوبة والاستغفار",
+                   "قصة يوسف", "آية الكرسي", "الجنة ونعيمها", "أحس بضيق", "الدعاء"]
+DAILY_VERSES = ["2:152", "2:186", "2:286", "3:139", "3:173", "9:40", "12:87", "13:28", "14:7", "15:49",
+                "20:114", "21:87", "29:69", "39:53", "40:60", "42:19", "50:16", "57:4", "58:11", "64:11",
+                "65:3", "93:5", "94:5", "2:153", "3:8", "7:56", "11:88", "17:80", "18:10", "25:74", "28:24"]
+
+
+@st.cache_resource(show_spinner=False)
+def search_suggestions() -> list:
+    raw = (FEATURED_TOPICS + list(_PHRASES_RAW) + list(_CONCEPTS_RAW)
+           + [l.split("|")[0].strip() for l in _TOPIC_TABLE.strip().splitlines() if "|" in l])
+    raw += [f"سورة {n}" for n in SURAH_NAMES]
+    best = {}
+    for q in raw:
+        q = q.strip()
+        if len(q) < 2 or not has_arabic(q) or "سوره" in q or q.startswith("قصص "):
+            continue
+        # نفضّل الإملاء الكامل (همزات وتاء مربوطة) عند تكرار الموضوع نفسه بأكثر من كتابة
+        k = _phrase_key_static(q)
+        score = (sum(q.count(c) for c in "أإآة") + (0.5 if q.startswith("ال") or q.startswith("سورة") else 0))
+        if k not in best or score > best[k][0]:
+            best[k] = (score, q)
+    seen, out = set(), []
+    for q in FEATURED_TOPICS + sorted((v[1] for v in best.values()), key=lambda x: (len(x.split()) > 2, x)):
+        if q not in seen:
+            seen.add(q)
+            out.append(q)
+    return out
+
+
+def _pick_topic():
+    if st.session_state.get("pill"):
+        st.session_state.q = st.session_state.pill
+    st.session_state.pill = None
+
+
+def _more():
+    st.session_state.limit = st.session_state.get("limit", RESULTS_SHOWN) + RESULTS_SHOWN
+
+
+MODE_MEANING, MODE_WORD = "بالمعنى والموضوع", "بالكلمة وجذرها"
+
+
+# ---------------------------------------------------------------------------
+# الصفحة
+# ---------------------------------------------------------------------------
 def main():
-    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    st.html(CUSTOM_CSS)
+    inject_page_js()
     st.markdown(
-        """
-        <div class="app-header">
-            <div class="mark">﴿ وَرَتِّلِ ٱلْقُرْءَانَ تَرْتِيلًا ﴾</div>
+        f"""<div class="hero">
+            <div class="verse">﴿ كِتَابٌ أَنزَلْنَاهُ إِلَيْكَ مُبَارَكٌ لِّيَدَّبَّرُوا آيَاتِهِ ﴾</div>
             <h1>الباحث القرآني</h1>
-            <p>ابحث في القرآن الكريم بالكلمة وجذرها، أو بالمعنى والموضوع</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            <div class="orn">{_STAR}</div>
+            <p>ابحث في القرآن الكريم بالمعنى والموضوع، أو بالكلمة وجذرها</p>
+        </div>""", unsafe_allow_html=True)
 
     model = load_model()
     D = load_data()
+    dev = st.query_params.get("dev") == "1"
 
-    # تبويب التقييم للمطورين فقط: لا يظهر للمستخدم، ويُفتح بإضافة ?dev=1 لرابط الموقع.
-    show_eval = st.query_params.get("dev") == "1"
-    names = ["البحث بالمعنى", "البحث بالكلمة"] + (["التقييم"] if show_eval else [])
-    tabs = st.tabs(names)
+    # أول زيارة: البحث من الرابط (?q=...&m=word) — روابط النتائج قابلة للمشاركة
+    if "q" not in st.session_state:
+        st.session_state.q = (st.query_params.get("q") or "")[:200] or None
+        st.session_state.mode = MODE_WORD if st.query_params.get("m") == "word" else MODE_MEANING
+    options = search_suggestions()
+    if st.session_state.q and st.session_state.q not in options:
+        options = [st.session_state.q] + options
 
-    # ------------------------------------------------------------------
-    # Tab 1: root-based text search
-    # ------------------------------------------------------------------
-    with tabs[1]:
-        st.caption(
-            "يجد كل آية فيها كلمة من نفس جذر كلمتك، والكلمة نفسها ومشتقاتها القريبة أولًا. "
-            "جرّب أيضًا اسم سورة: «سورة الكهف».")
-        text_query = st.text_input("البحث بالكلمة", placeholder="مثال: الصبر، يوسف، الزكاة",
-                                   label_visibility="collapsed", key="text_query_input")[:200]
-        if text_query.strip() and not has_arabic(text_query):
-            st.warning("اكتب كلمة البحث بالحروف العربية، مثل: الصبر")
-        elif text_query.strip():
-            matches = text_search(text_query, D)
-            if matches.empty:
-                st.warning("لا توجد آيات من جذر هذه الكلمة.")
-            else:
-                st.markdown(f'<div class="count">{len(matches)} آية فيها كلمات من الجذر نفسه</div>', unsafe_allow_html=True)
-                render_results_table(matches, "تطابق")
-                if len(matches) > RESULTS_SHOWN:
-                    download_button(matches, ["text", "score", "words_matched", "matched", "also"],
-                                    "text_search", "text_dl")
+    st.selectbox("ابحث", options, key="q", accept_new_options=True, label_visibility="collapsed",
+                 placeholder="اكتب كلمة أو موضوعًا أو سؤالًا… مثل: الصبر على البلاء")
+    c1, c2 = st.columns([3, 1], vertical_alignment="center")
+    with c1:
+        st.segmented_control("طريقة البحث", [MODE_MEANING, MODE_WORD], key="mode", required=True, label_visibility="collapsed")
+    with c2:
+        with st.popover("تضييق البحث", width="stretch"):
+            suras = st.multiselect("السور", list(range(1, 115)), key="f_sura",
+                                   format_func=lambda n: f"{_ar(n)} · {_sura_name(n)}", placeholder="كل السور")
+            juz = st.selectbox("الجزء", [0] + list(range(1, 31)), key="f_juz",
+                               format_func=lambda n: "كل الأجزاء" if n == 0 else f"الجزء {_ar(n)}")
+    st.pills("مواضيع مقترحة", FEATURED_TOPICS, key="pill", on_change=_pick_topic, label_visibility="collapsed")
+
+    query = (st.session_state.q or "")[:200].strip()
+    mode = st.session_state.mode or MODE_MEANING
+    params = {"q": query, "m": "word" if mode == MODE_WORD else "meaning"}
+    if dev:
+        params["dev"] = "1"
+    if query and dict(st.query_params) != params:
+        st.query_params.from_dict(params)
+    sig = (query, mode, tuple(suras), juz)
+    if st.session_state.get("sig") != sig:
+        st.session_state.sig, st.session_state.limit = sig, RESULTS_SHOWN
+    limit = st.session_state.limit
+
+    def in_scope(df):
+        keep = np.ones(len(df), dtype=bool)
+        if suras:
+            keep &= df["sura"].isin(suras).to_numpy()
+        if juz:
+            keep &= D.juz[df["vidx"].to_numpy()] == juz
+        return df[keep]
+
+    scope = ""
+    if suras or juz:
+        scope = " في " + "، ".join([f"سورة {_sura_name(n)}" for n in suras[:3]] + ([f"الجزء {_ar(juz)}"] if juz else []))
+
+    if not query:
+        ref = DAILY_VERSES[pd.Timestamp.today().toordinal() % len(DAILY_VERSES)]
+        s, a = map(int, ref.split(":"))
+        st.markdown(f'<div class="orn">{_STAR}</div><div class="daily"><span class="label">آية اليوم</span></div>'
+                    + verse_card(D, D.vidx[(s, a)], label="آية اليوم"), unsafe_allow_html=True)
+        st.markdown('<div class="sec-title" style="text-align:center">اضغط على أي كلمة في الآية لترى جذرها، '
+                    'أو اختر موضوعًا من الأعلى</div>', unsafe_allow_html=True)
+    elif not has_arabic(query):
+        st.warning("اكتب بالحروف العربية، مثل: الصبر على البلاء")
+    elif mode == MODE_WORD:
+        matches = in_scope(text_search(query, D))
+        if matches.empty:
+            st.warning("لا توجد آيات من جذر هذه الكلمة" + scope + ".")
         else:
-            st.info("اكتب كلمة أو أكثر ثم اضغط Enter.")
-
-    # ------------------------------------------------------------------
-    # Tab 2: semantic search (hybrid)
-    # ------------------------------------------------------------------
-    with tabs[0]:
-        st.caption(
-            "يجد الآيات الأقرب في المعنى حتى لو اختلفت الألفاظ. اكتب موضوعًا أو سؤالًا بأسلوبك: "
-            "«الصبر على البلاء»، «وش حكم الربا»، «قصة يوسف»، «أحس بضيق».")
-        semantic_query = st.text_input("البحث بالمعنى",
-                                       placeholder="مثال: التوكل على الله، بر الوالدين، آيات عن الأمل",
-                                       label_visibility="collapsed", key="semantic_query_input")[:200]
-        if semantic_query.strip() and not has_arabic(semantic_query):
-            st.warning("اكتب سؤالك بالحروف العربية، مثل: الصبر على البلاء")
-        elif semantic_query.strip():
-            results = semantic_search(semantic_query, model, D)
-            relevant = results[results["relevant"]]
-            show_all = st.checkbox("إظهار الآيات الأبعد صلة أيضًا", value=False, key="sem_all")
-            shown = results if (show_all or relevant.empty) else relevant
+            n_sura = matches["sura"].nunique()
+            st.markdown(f'<div class="count"><span>وردت كلمات من الجذر نفسه في <b>{_ar(len(matches))}</b> آية '
+                        f'من <b>{_ar(n_sura)}</b> سورة{scope}</span><span>الكلمة نفسها ومشتقاتها القريبة أولًا</span></div>',
+                        unsafe_allow_html=True)
+            render_results(matches, D, limit)
+            if len(matches) > limit:
+                st.button(f"عرض المزيد ({_ar(len(matches) - limit)} آية أخرى)", on_click=_more, width="stretch")
+            download_button(matches, ["text", "score", "words_matched", "matched", "also"], "word_search", "text_dl")
+    else:
+        results = in_scope(semantic_search(query, model, D))
+        relevant = results[results["relevant"]]
+        shown = relevant if not relevant.empty else results
+        if results.empty:
+            st.warning("لا توجد آيات" + scope + ".")
+        else:
             if relevant.empty:
-                st.warning("لم نجد آيات وثيقة الصلة — هذه أقرب الآيات.")
+                st.markdown(f'<div class="count"><span>لم نجد آيات وثيقة الصلة{scope} — هذه أقرب الآيات</span></div>',
+                            unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="count">{len(relevant)} آية ذات صلة — يُعرض أول {min(RESULTS_SHOWN, len(shown))}</div>', unsafe_allow_html=True)
-            render_results_table(shown, "الدرجة")
+                st.markdown(f'<div class="count"><span><b>{_ar(len(relevant))}</b> آية ذات صلة{scope}</span>'
+                            f'<span>مرتبة من الأقرب إلى الأبعد</span></div>', unsafe_allow_html=True)
+            render_results(shown, D, limit)
+            if len(shown) > limit:
+                st.button(f"عرض المزيد ({_ar(len(shown) - limit)} آية أخرى)", on_click=_more, width="stretch")
             download_button(results, ["text", "score", "semantic", "lexical", "relevant", "matched", "also"],
-                            "semantic_search", "sem_dl")
-            with st.expander("كيف تُحسب الدرجة؟"):
-                st.markdown(
-                    f"- **الدرجة** = التشابه في المعنى (نموذج مدرَّب على القرآن والتفسير) + {BETA_LEXICAL} × قوة تطابق الكلمات.\n"
-                    "- **تطابق الكلمات**: نفس الكلمة القرآنية = 1.0، مشتق قريب = 0.65، نفس الجذر بمعنى آخر = 0.15 "
-                    "(الجذور من مدوّنة القرآن الكريم الصرفية)، والآيات المحورية لموضوع معروف = 1.3.\n"
-                    "- **الكلمات المطابقة** مظلّلة في نص الآية.")
-        else:
-            st.info("اكتب موضوعًا أو سؤالًا ثم اضغط Enter.")
+                            "meaning_search", "sem_dl")
 
-    # ------------------------------------------------------------------
-    # Tab 3: evaluation (developers)
-    # ------------------------------------------------------------------
-    if show_eval:
-        with tabs[2]:
+    with st.expander("عن الباحث القرآني"):
+        st.markdown(
+            "- **البحث بالمعنى**: يفهم سؤالك ولو اختلفت ألفاظه عن ألفاظ الآيات، بنموذج لغوي دُرّب على آيات القرآن "
+            "وتفسيرها، مع مطابقة الكلمات وجذورها من مدوّنة القرآن الكريم الصرفية.\n"
+            "- **البحث بالكلمة وجذرها**: يعرض كل آية فيها كلمة من جذر كلمتك، الكلمة نفسها ومشتقاتها القريبة أولًا.\n"
+            "- اضغط على أي كلمة في الآية لترى جذرها وأصلها وعدد مرات ورود جذرها.\n"
+            "- المصادر: نص المصحف من Tanzil، الصرف من Quranic Arabic Corpus، التفسير الميسر، "
+            "والتلاوة بصوت الشيخ مشاري العفاسي من EveryAyah.")
+    st.markdown(f'<div class="site-foot"><div class="orn">{_STAR}</div>الباحث القرآني — مشروع تخرج</div>',
+                unsafe_allow_html=True)
+
+    if dev:
+        with st.expander("التقييم (للمطورين)", expanded=False):
             st.caption("Old ranking (v2: ISRI root bonus) vs new ranking (v3) on a fixed benchmark. "
-                       "Gold = key verses of each topic. MRR = 1/rank of the first gold verse; "
-                       "P@10 = share of gold verses in the top 10; R@20 = share of gold found in the top 20.")
+                       "MRR = 1/rank of the first gold verse; P@10 = share of gold in the top 10; R@20 = share of gold found in the top 20. "
+                       f"Score = semantic + {BETA_LEXICAL} × lexical (tiers 1.0 / 0.65 / 0.15, core verses 1.3).")
             if st.button("Run benchmark", key="run_bench"):
                 with st.spinner("Running..."):
                     bench = run_benchmark(model, D)
                 metric_cols = [f"{v} {m}" for v in ("old", "new") for m in ("MRR", "P@10", "R@20")]
                 avg = bench[metric_cols].astype(float).mean()
-                c1, c2, c3 = st.columns(3)
-                c1.metric("MRR", f"{avg['new MRR']:.3f}", f"{avg['new MRR'] - avg['old MRR']:+.3f}")
-                c2.metric("P@10", f"{avg['new P@10']:.3f}", f"{avg['new P@10'] - avg['old P@10']:+.3f}")
-                c3.metric("R@20", f"{avg['new R@20']:.3f}", f"{avg['new R@20'] - avg['old R@20']:+.3f}")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("MRR", f"{avg['new MRR']:.3f}", f"{avg['new MRR'] - avg['old MRR']:+.3f}")
+                m2.metric("P@10", f"{avg['new P@10']:.3f}", f"{avg['new P@10'] - avg['old P@10']:+.3f}")
+                m3.metric("R@20", f"{avg['new R@20']:.3f}", f"{avg['new R@20'] - avg['old R@20']:+.3f}")
                 st.dataframe(bench, hide_index=True, width="stretch")
-                st.download_button("Download benchmark (CSV)", bench.to_csv(index=False).encode("utf-8-sig"),
-                                   "benchmark.csv", "text/csv", key="bench_dl")
 
 
 if __name__ == "__main__":

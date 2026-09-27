@@ -1,4 +1,4 @@
-streamlit>=1.46
+streamlit>=1.60
 sentence-transformers>=3.0
 pandas
 numpy

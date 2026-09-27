@@ -10,4 +10,8 @@ runOnSave = false
 gatherUsageStats = false
 
 [theme]
-primaryColor = "#1f6f50"
+base = "light"
+primaryColor = "#17503b"
+backgroundColor = "#f7f2e6"
+secondaryBackgroundColor = "#efe3c4"
+textColor = "#1e2622"
