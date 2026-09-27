@@ -1854,14 +1854,41 @@ def run_benchmark(model, D: SearchData) -> pd.DataFrame:
 # UI helpers
 # ---------------------------------------------------------------------------
 CUSTOM_CSS = """
+<link href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;600&family=Amiri:wght@400;700&family=Noto+Kufi+Arabic:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-    html, body, [class*="css"]  {
-        font-family: -apple-system, "Segoe UI", Tahoma, Geneva, Arial, sans-serif;
+    :root { --ink:#1f2a24; --muted:#6b756f; --line:#e4e7e2; --paper:#fbfaf6; --brand:#1d5c45; --brand-soft:#e8f1ec; --gold:#b08d3e; }
+    html, body, [class*="css"], .stMarkdown, .stTextInput input, .stTabs button, .stCaption, .stAlert {
+        font-family: "Noto Kufi Arabic", Tahoma, sans-serif !important; }
+    .main .block-container { direction: rtl; text-align: right; max-width: 860px; }
+    .stTextInput input { direction: rtl; text-align: right; font-size: 1.05rem; padding: .7rem .9rem; border-radius: 12px; }
+    .stTabs [data-baseweb="tab-list"] { direction: rtl; gap: .25rem; }
+    .stTabs [data-baseweb="tab"] { font-weight: 600; }
+    .app-header { text-align: center; padding: 1.2rem 0 1.4rem; border-bottom: 1px solid var(--line); margin-bottom: 1rem; }
+    .app-header .mark { font-family: "Amiri", serif; color: var(--gold); font-size: 1.6rem; line-height: 1; }
+    .app-header h1 { font-size: 2rem; font-weight: 700; color: var(--brand); margin: .35rem 0 .3rem; }
+    .app-header p { color: var(--muted); font-size: .95rem; margin: 0; }
+    .count { color: var(--muted); font-size: .9rem; margin: .4rem 0 .8rem; }
+    .verse-card { background: var(--paper); border: 1px solid var(--line); border-radius: 14px;
+                  padding: .9rem 1.1rem 1rem; margin-bottom: .75rem; direction: rtl; }
+    .verse-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem;
+                  font-size: .85rem; color: var(--muted); margin-bottom: .45rem; }
+    .verse-ref { font-weight: 700; color: var(--brand); }
+    .verse-score { background: var(--brand-soft); color: var(--brand); border-radius: 999px; padding: .1rem .6rem;
+                   font-size: .78rem; font-weight: 600; white-space: nowrap; }
+    .verse-text { font-family: "Noto Naskh Arabic", "Amiri", serif; font-size: 1.6rem; line-height: 2.7rem; color: var(--ink); }
+    .ayah-num { display: inline-block; min-width: 1.9rem; height: 1.9rem; line-height: 1.9rem; text-align: center;
+                border: 1.5px solid var(--gold); border-radius: 50%; font-size: .95rem; color: var(--gold);
+                font-family: "Noto Kufi Arabic", sans-serif; margin-right: .35rem; vertical-align: middle; }
+    .stMarkdown, [data-testid="stCaptionContainer"], .count, .stAlert, .stCheckbox, [data-testid="stExpander"] {
+        direction: rtl; text-align: right; }
+    .verse-text mark { background: #f3e7c6; color: inherit; border-radius: 4px; padding: 0 .1rem; }
+    .verse-foot { margin-top: .5rem; font-size: .8rem; color: var(--muted); }
+    .chip { display: inline-block; background: #fff; border: 1px solid var(--line); border-radius: 999px;
+            padding: .05rem .55rem; margin: .1rem 0 .1rem .3rem; font-size: .8rem; color: var(--ink); }
+    @media (prefers-color-scheme: dark) {
+        :root { --ink:#eef1ec; --muted:#a3ada6; --line:#34403a; --paper:#18201c; --brand:#7cc4a4; --brand-soft:#223a30; }
+        .verse-text mark { background: #4a3f22; } .chip { background: #111713; }
     }
-    .app-header { text-align: center; padding: 0.5rem 0 1.5rem 0; }
-    .app-header h1 { font-size: 2.1rem; font-weight: 700; color: #1a1a2e;
-                     margin-bottom: 0.25rem; letter-spacing: -0.02em; }
-    .app-header p { color: #6b7280; font-size: 1rem; margin: 0; }
 </style>
 """
 
@@ -1876,28 +1903,54 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def _sura_name(n: int) -> str:
+    return SURAH_NAMES[n - 1] if 1 <= n <= len(SURAH_NAMES) else str(n)
+
+
+_AR_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
+
+
+def _highlight(text: str, matched: str) -> str:
+    """يظلّل الكلمة كاملة (لا جزءًا منها، حتى لا ينكسر اتصال الحروف)."""
+    import html as _html
+    keys = {_strip_article(lex_key(w)) for w in str(matched or "").split("،") if w.strip()}
+    keys |= {lex_key(w) for w in str(matched or "").split("،") if w.strip()}
+    out = []
+    for tok in str(text).split():
+        k = lex_key(tok)
+        # ألف الوصل وبعض علامات الضبط الصغيرة (۟ ۢ ۥ ۦ) لا تُرسم في خطوط الويب فتترك فراغًا
+        esc = _html.escape(re.sub("[\u06DF\u06E0\u06E1\u06E2\u06E5\u06E6\u06ED]", "", tok.replace("ٱ", "ا")))
+        out.append(f"<mark>{esc}</mark>" if k and (k in keys or _strip_article(k) in keys) else esc)
+    return " ".join(out)
+
+
 def render_results_table(df: pd.DataFrame, score_label: str, height: int = 700):
-    view = df.head(RESULTS_SHOWN).copy()
-    view.insert(0, "Ref", [f"{s}:{a}" for s, a in zip(view["sura"], view["aya"])])
-    cols = ["Ref", "text", "score", "matched"]
-    config = {
-        "Ref": st.column_config.TextColumn("Surah:Aya", width="small"),
-        "text": st.column_config.TextColumn("Verse", width="large"),
-        "score": st.column_config.NumberColumn(score_label, format="%.3f", width="small"),
-        "matched": st.column_config.TextColumn("Matched words", width="medium"),
-    }
-    if "also" in view.columns and view["also"].astype(bool).any():
-        cols.append("also")
-        config["also"] = st.column_config.TextColumn("Same text also in", width="small")
-    st.dataframe(view[cols], column_config=config, hide_index=True,
-                 width="stretch", height=height)
+    """بطاقة لكل آية: السورة والآية، النص بخط المصحف مع تظليل الكلمات المطابقة، والدرجة."""
+    import html as _html
+    cards = []
+    for _, r in df.head(RESULTS_SHOWN).iterrows():
+        sura, aya = int(r["sura"]), int(r["aya"])
+        chips = "".join(f'<span class="chip">{_html.escape(w.strip())}</span>'
+                        for w in str(r.get("matched", "") or "").split("،") if w.strip())
+        foot = f"الكلمات المطابقة: {chips}" if chips else ""
+        also = str(r.get("also", "") or "")
+        if also:
+            foot += f'{" · " if foot else ""}النص نفسه أيضًا في: {_html.escape(also)}'
+        cards.append(
+            f'<div class="verse-card"><div class="verse-head">'
+            f'<span class="verse-ref">سورة {_sura_name(sura)} · الآية {aya}</span>'
+            f'<span class="verse-score">{score_label} {float(r["score"]):.2f}</span></div>'
+            f'<div class="verse-text">{_highlight(str(r["text"]), r.get("matched", ""))}'
+            f'<span class="ayah-num">{str(aya).translate(_AR_DIGITS)}</span></div>'
+            + (f'<div class="verse-foot">{foot}</div>' if foot else "") + "</div>")
+    st.markdown("".join(cards), unsafe_allow_html=True)
 
 
 def download_button(df: pd.DataFrame, cols: list, name: str, key: str):
     export = df.copy()
     export.insert(0, "Ref", [f"{s}:{a}" for s, a in zip(export["sura"], export["aya"])])
     st.download_button(
-        label=f"Download all {len(export)} results (Excel)",
+        label=f"تحميل كل النتائج ({len(export)}) — Excel",
         data=to_excel_bytes(export[["Ref"] + [c for c in cols if c in export.columns]]),
         file_name=f"{name}_results.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1918,8 +1971,9 @@ def main():
     st.markdown(
         """
         <div class="app-header">
-            <h1>Quran Search</h1>
-            <p>Root-based text search, or meaning-based semantic search — pick a tab below.</p>
+            <div class="mark">﴿ وَرَتِّلِ ٱلْقُرْءَانَ تَرْتِيلًا ﴾</div>
+            <h1>الباحث القرآني</h1>
+            <p>ابحث في القرآن الكريم بالكلمة وجذرها، أو بالمعنى والموضوع</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1928,68 +1982,66 @@ def main():
     model = load_model()
     D = load_data()
 
-    show_eval = st.sidebar.checkbox("Evaluation tab (developers)", value=False)
-    names = ["Text Search", "Semantic Search"] + (["Evaluation"] if show_eval else [])
+    show_eval = st.sidebar.checkbox("تبويب التقييم (للمطورين)", value=False)
+    names = ["البحث بالمعنى", "البحث بالكلمة"] + (["التقييم"] if show_eval else [])
     tabs = st.tabs(names)
 
     # ------------------------------------------------------------------
     # Tab 1: root-based text search
     # ------------------------------------------------------------------
-    with tabs[0]:
+    with tabs[1]:
         st.caption(
-            "Finds every verse containing any word sharing the same Arabic root "
-            "(e.g. searching \"النجم\" also finds \"والنجم إذا هوى\" and \"النجم الثاقب\"). "
-            "Exact words and close derivatives are listed first.")
-        text_query = st.text_input("Text search", placeholder="e.g. النجم, الصبر, يوسف...",
-                                   label_visibility="collapsed", key="text_query_input", max_chars=200)
+            "يجد كل آية فيها كلمة من نفس جذر كلمتك، والكلمة نفسها ومشتقاتها القريبة أولًا. "
+            "جرّب أيضًا اسم سورة: «سورة الكهف».")
+        text_query = st.text_input("البحث بالكلمة", placeholder="مثال: الصبر، يوسف، الزكاة",
+                                   label_visibility="collapsed", key="text_query_input")[:200]
         if text_query.strip() and not has_arabic(text_query):
-            st.warning("Please type the query in Arabic letters (e.g. الصبر).")
+            st.warning("اكتب كلمة البحث بالحروف العربية، مثل: الصبر")
         elif text_query.strip():
             matches = text_search(text_query, D)
             if matches.empty:
-                st.warning("No verses matched the root of this word.")
+                st.warning("لا توجد آيات من جذر هذه الكلمة.")
             else:
-                st.success(f"{len(matches)} verse(s) found (root-based match)")
-                render_results_table(matches, "Match")
+                st.markdown(f'<div class="count">{len(matches)} آية فيها كلمات من الجذر نفسه</div>', unsafe_allow_html=True)
+                render_results_table(matches, "تطابق")
                 if len(matches) > RESULTS_SHOWN:
                     download_button(matches, ["text", "score", "words_matched", "matched", "also"],
                                     "text_search", "text_dl")
         else:
-            st.info("Type one or more words above, then press Enter.")
+            st.info("اكتب كلمة أو أكثر ثم اضغط Enter.")
 
     # ------------------------------------------------------------------
     # Tab 2: semantic search (hybrid)
     # ------------------------------------------------------------------
-    with tabs[1]:
+    with tabs[0]:
         st.caption(
-            "Finds verses closest in meaning (not literal wording) — useful for "
-            "general themes and ideas such as \"الصبر على البلاء\".")
-        semantic_query = st.text_input("Semantic search",
-                                       placeholder="e.g. الصبر على البلاء, التوكل على الله...",
-                                       label_visibility="collapsed", key="semantic_query_input", max_chars=200)
+            "يجد الآيات الأقرب في المعنى حتى لو اختلفت الألفاظ. اكتب موضوعًا أو سؤالًا بأسلوبك: "
+            "«الصبر على البلاء»، «وش حكم الربا»، «قصة يوسف»، «أحس بضيق».")
+        semantic_query = st.text_input("البحث بالمعنى",
+                                       placeholder="مثال: التوكل على الله، بر الوالدين، آيات عن الأمل",
+                                       label_visibility="collapsed", key="semantic_query_input")[:200]
         if semantic_query.strip() and not has_arabic(semantic_query):
-            st.warning("Please type the query in Arabic letters (e.g. الصبر على البلاء).")
+            st.warning("اكتب سؤالك بالحروف العربية، مثل: الصبر على البلاء")
         elif semantic_query.strip():
             results = semantic_search(semantic_query, model, D)
             relevant = results[results["relevant"]]
-            show_all = st.checkbox("Include loosely related verses", value=False, key="sem_all")
+            show_all = st.checkbox("إظهار الآيات الأبعد صلة أيضًا", value=False, key="sem_all")
             shown = results if (show_all or relevant.empty) else relevant
             if relevant.empty:
-                st.warning("No strongly related verses found — showing the closest ones.")
+                st.warning("لم نجد آيات وثيقة الصلة — هذه أقرب الآيات.")
             else:
-                st.markdown(f"**{len(relevant)} related verse(s)** — top {min(RESULTS_SHOWN, len(shown))} shown")
-            render_results_table(shown, "Score")
+                st.markdown(f'<div class="count">{len(relevant)} آية ذات صلة — يُعرض أول {min(RESULTS_SHOWN, len(shown))}</div>', unsafe_allow_html=True)
+            render_results_table(shown, "الدرجة")
             download_button(results, ["text", "score", "semantic", "lexical", "relevant", "matched", "also"],
                             "semantic_search", "sem_dl")
-            with st.expander("How is the score computed?"):
+            with st.expander("كيف تُحسب الدرجة؟"):
                 st.markdown(
-                    f"- **Score** = meaning similarity (fine-tuned model) + {BETA_LEXICAL} × word-match strength.\n"
-                    "- **Word match**: exact Quranic word/lemma = 1.0, close derivative = 0.65, "
-                    "same root with a different meaning = 0.15 (roots and lemmas from the Quranic "
-                    "Arabic Corpus).\n"
-                    "- **Matched words** shows the words in the verse that matched your query.")
+                    f"- **الدرجة** = التشابه في المعنى (نموذج مدرَّب على القرآن والتفسير) + {BETA_LEXICAL} × قوة تطابق الكلمات.\n"
+                    "- **تطابق الكلمات**: نفس الكلمة القرآنية = 1.0، مشتق قريب = 0.65، نفس الجذر بمعنى آخر = 0.15 "
+                    "(الجذور من مدوّنة القرآن الكريم الصرفية)، والآيات المحورية لموضوع معروف = 1.3.\n"
+                    "- **الكلمات المطابقة** مظلّلة في نص الآية.")
         else:
-            st.info("Type a theme or idea above, then press Enter.")
+            st.info("اكتب موضوعًا أو سؤالًا ثم اضغط Enter.")
 
     # ------------------------------------------------------------------
     # Tab 3: evaluation (developers)
