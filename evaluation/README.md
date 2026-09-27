@@ -30,7 +30,7 @@ Use a T4 GPU runtime (Runtime → Change runtime type) for the model comparison.
 |---|---|
 | `test_queries.txt` | 992 topic queries in several phrasings (first review set). |
 | `test_queries2.txt` | 835 unseen queries (second review set). |
-| `test_queries3.txt` | 330 further queries prepared for a third round. |
+| `test_queries3.txt` | 292 further queries prepared for a third round. |
 | `test_queries_en.txt` | 60 free English queries (not yet evaluated). |
 | `test_fragments.tsv` | 300 verse fragments with the verse they come from (`fragment<TAB>sura:aya`). |
 | `test_expected2.tsv` | 80 well-known verse quotations with their reference. |
