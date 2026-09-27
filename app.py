@@ -42,6 +42,7 @@ Run locally with:
 import re
 import io
 import math
+import unicodedata
 from collections import Counter
 
 import numpy as np
@@ -214,8 +215,10 @@ _isri = ISRIStemmer()
 # مما ترك" (4:7، 4:33).
 _INHERITANCE = [
     ("lemma", ("سدس", "سُدُس"), TIER_STRONG), ("lemma", ("ثمن", "ثُمُن"), TIER_STRONG),
-    ("lemma", ("ربع", "رُبُع"), TIER_STRONG), ("lemma", ("ثلث", "ثُلُث"), TIER_STRONG),
-    ("lemma", ("نصف", "نِصْف"), TIER_MEDIUM), ("and", ("نصب", "ترك"), TIER_STRONG),
+    ("lemma", ("ربع", "رُبُع"), TIER_STRONG), ("and", ("نصب", "ترك"), TIER_STRONG),
+    ("and", ("ورث", "ترك"), TIER_STRONG),
+    # الثلث والنصف يأتيان أيضًا في "ثلثي الليل ونصفه" (73:3، 73:20) فوزنهما أقل
+    ("lemma", ("ثلث", "ثُلُث"), TIER_MEDIUM), ("lemma", ("نصف", "نِصْف"), TIER_WEAK),
 ]
 _CONCEPTS_RAW = {
     # "عقوق" ليست لفظًا قرآنيًا؛ النهي عنه في القرآن بلفظ "أُفّ" (17:23، 46:17)
@@ -238,6 +241,12 @@ _CONCEPTS_RAW = {
     "مواريث": ("replace", [("root", "ورث", TIER_WEAK)] + _INHERITANCE),
     "ارث": ("replace", [("root", "ورث", TIER_WEAK)] + _INHERITANCE),
     "فرائض": ("replace", [("root", "ورث", TIER_WEAK)] + _INHERITANCE),
+    # جذور يلتبس فيها الاسم بمشتقات فعلية بمعنى آخر (قيس في التقييم الفعلي):
+    # "الجنة" جلبت "والجانّ خلقناه من قبل من نار السموم" (15:27، 55:15)،
+    # و"الربا" جلبت "أخذة رابية" و"اهتزت وربت" (الانتفاخ). المطابقة القوية
+    # هنا للمدخل نفسه فقط، وبقية الجذر ضعيفة.
+    "جنه": ("replace", [("lemma", ("جنن", "جَنَّة"), TIER_STRONG), ("root", "جنن", TIER_WEAK)]),
+    "ربا": ("replace", [("lemma", ("ربو", "رِبا"), TIER_STRONG), ("root", "ربو", TIER_WEAK)]),
     # الوضوء: لفظه القرآني "فاغسلوا" (5:6)
     "وضوء": ("replace", [("root", "غسل", TIER_STRONG)]),
     "قمار": ("replace", [("lemma", ("يسر", "مَيْسِر"), TIER_STRONG)]),
@@ -251,6 +260,12 @@ CONCEPTS = {lex_key(k): v for k, v in _CONCEPTS_RAW.items()}
 class Lexicon:
     """Word-level morphology for the whole Quran + inverted indexes."""
     pass
+
+
+def _nfc(text):
+    """توحيد ترتيب علامات التشكيل (Unicode NFC): "جَنَّة" قد تُكتب شدة ثم فتحة أو
+    فتحة ثم شدة؛ بدون التوحيد لا تتطابق القاعدة المكتوبة يدويًا مع بيانات المعجم."""
+    return unicodedata.normalize("NFC", text) if text else text
 
 
 def _parse_morphology(path: str) -> dict:
@@ -343,6 +358,7 @@ def build_lexicon(verses_df: pd.DataFrame, path: str = MORPH_FILE) -> Lexicon:
             continue
         r = d["root"]
         l = lemma_fix.get((r, d["lemma"]), d["lemma"])
+        l = _nfc(l)
         vf = d["vf"]
         w_verse.append(vidx[(s, a)])
         w_pos.append(w)
@@ -496,7 +512,7 @@ def analyze_query_word(word: str, lex: Lexicon, ignore_stop: bool = False):
 
 def _rule_word_ids(kind, key, lex: Lexicon):
     if kind == "lemma":
-        return lex.by_lemma.get(key)
+        return lex.by_lemma.get((key[0], _nfc(key[1])))
     if kind == "root_vf":
         return lex.by_root_vf.get(key)
     if kind == "root":
