@@ -287,6 +287,33 @@ def _nfc(text):
     return unicodedata.normalize("NFC", text) if text else text
 
 
+# ---------------------------------------------------------------------------
+# Sliding windows inside long segments
+# ---------------------------------------------------------------------------
+# قسنا مع النموذج الحقيقي: عبارة موجودة حرفيًا داخل جزء طويل تأخذ تشابهًا شبه صفري،
+# مثل "كظم الغيظ والعفو" مع جزء 3:134 الذي فيه "والكاظمين الغيظ والعافين عن الناس"
+# (0.06)، بينما "إن الله كان عفوا غفورا" القصيرة تأخذ 0.59. النموذج يقرّب الاستعلام
+# القصير من النص القصير. الحل: نوافذ من WINDOW_WORDS كلمات داخل كل جزء أطول منها،
+# والآية تأخذ أعلى تشابه بين أجزائها ونوافذها.
+WINDOW_WORDS = 6
+WINDOW_STRIDE = 3
+
+
+def make_windows(segments_df: pd.DataFrame) -> pd.DataFrame:
+    """نوافذ متداخلة داخل الأجزاء الأطول من WINDOW_WORDS كلمة (نفس الترتيب دائمًا)."""
+    rows = []
+    for seg_idx, text in enumerate(segments_df["text"]):
+        words = str(text).split()
+        if len(words) <= WINDOW_WORDS:
+            continue
+        starts = list(range(0, len(words) - WINDOW_WORDS + 1, WINDOW_STRIDE))
+        if starts[-1] != len(words) - WINDOW_WORDS:
+            starts.append(len(words) - WINDOW_WORDS)
+        for st_ in starts:
+            rows.append((seg_idx, " ".join(words[st_:st_ + WINDOW_WORDS])))
+    return pd.DataFrame(rows, columns=["segment", "text"])
+
+
 def _parse_morphology(path: str) -> dict:
     words = {}
     with open(path, encoding="utf-8") as fh:
