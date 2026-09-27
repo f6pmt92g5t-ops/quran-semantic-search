@@ -468,6 +468,10 @@ def analyze_query_word(word: str, lex: Lexicon, ignore_stop: bool = False):
     k = lex_key(word)
     if len(k) < MIN_WORD_LEN or (k in STOP_KEYS and not ignore_stop):
         return []
+    # حرف عطف ملتصق بكلمة وظيفية ("ولكم"، "فيهم" ← "لكم"، "هم"): كلمة وظيفية أيضًا.
+    # بدونه حُلّلت "ولكم" كالفعل "ولّى" فأخذت وزن كلمة موضوع (اكتشفه بوت الاختبار).
+    if k[:1] in ("و", "ف") and k[1:] in STOP_KEYS:
+        return []
     base = _strip_article(k)
     concept = CONCEPTS.get(base) or CONCEPTS.get(k)
     if concept and concept[0] == "replace":
@@ -485,7 +489,11 @@ def analyze_query_word(word: str, lex: Lexicon, ignore_stop: bool = False):
         top = max(hits.values())
         for (r, l, vf, _noun), n in hits.items():
             if n < 0.25 * top:
-                continue          # تحليل نادر لنفس الحروف (جِنّة مقابل جَنّة) — نتجاهله
+                # تحليل نادر لنفس الحروف (جِنّة مقابل جَنّة): لا نعطيه مطابقة قوية، لكنه
+                # نفس الكلمة المكتوبة حرفيًا فيأخذ مطابقة متوسطة بدل تجاهله كليًا.
+                # مثال: "شرب" تُحلَّل فعلًا (شَرِبَ)، و"لها شِرْبٌ" (26:155) اسم نادر.
+                rules.append(("lemma", (r, l), TIER_MEDIUM))
+                continue
             form = vf or _guess_form(lex_key(l or ""), r, lex.root_forms)
             rules.append(("lemma", (r, l), TIER_STRONG))
             if form and form != "1":
@@ -558,6 +566,10 @@ def analyze_query(query: str, lex: Lexicon):
     non_meta = [w for w in content if lex_key(w) not in META_KEYS]
     if non_meta:
         content = non_meta
+
+    # كلمة مكررة في الاستعلام ("لها شرب ولكم شرب") تُحتسب مرة واحدة، وإلا تضاعف وزنها.
+    seen = set()
+    content = [w for w in content if not (lex_key(w) in seen or seen.add(lex_key(w)))]
 
     candidates = []
     for w in content:
@@ -729,6 +741,8 @@ def load_data() -> SearchData:
     D.lex = build_lexicon(D.verses)
     D.legacy_roots = legacy_build_root_index(D.verses["text_original"])
     D.text_key = D.verses["text"].apply(lex_key).to_numpy()   # لدمج الآيات المتطابقة نصًا
+    # كلمات كل آية بعد التوحيد وحذف السوابق: لترتيب "الكلمة نفسها أولًا" في البحث النصي
+    D.word_sets = [{_strip_article(lex_key(w)) for w in t.split()} for t in D.verses["text"]]
     return D
 
 
@@ -799,7 +813,11 @@ def text_search(query: str, D: SearchData) -> pd.DataFrame:
         return pd.DataFrame(columns=["vidx", "sura", "aya", "text", "score", "matched", "also"])
     hits = np.nonzero(lexical > 0)[0]
     words_matched = (tiers[:, hits] > 0).sum(0)
-    order = sorted(range(len(hits)), key=lambda j: (-lexical[hits[j]], hits[j]))
+    # عند تساوي الدرجة (مثلًا كل مشتقات "استوى" قوية) تتقدم الآية التي فيها الكلمة
+    # بلفظها كما كُتبت ("استويت" 23:28) بدل ترتيب المصحف فقط.
+    qkeys = {_strip_article(lex_key(w)) for w in normalize_arabic(query).split()} - STOP_KEYS
+    exact = np.array([len(qkeys & D.word_sets[i]) for i in hits])
+    order = sorted(range(len(hits)), key=lambda j: (-round(float(lexical[hits[j]]), 6), -exact[j], hits[j]))
     idx = hits[order]
     matched = matched_words_by_verse(word_tier, D.lex, TIER_WEAK)
     df = pd.DataFrame({

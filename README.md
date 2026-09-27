@@ -54,6 +54,7 @@ Details, per-query results and the comparison with multilingual-e5 and BGE-M3 ar
 | `requirements.txt` | Python packages. |
 | `colab_compare_models.py` | Colab script: compares embedding models on the benchmark. |
 | `colab_ensemble.py` | Colab script: tests mixing the current model with a second model. |
+| `colab_test_bot.py` | Colab test bot: runs the app code with the real model on ~200 checks (known topics, verse fragments, colloquial and odd inputs, benchmark, speed) and writes `bot_report.xlsx`. |
 
 ## Run locally
 
