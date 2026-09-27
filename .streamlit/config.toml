@@ -1,0 +1,13 @@
+[client]
+# إخفاء قائمة المطوّر وأدواته عن زوّار الموقع
+toolbarMode = "minimal"
+showErrorDetails = false
+
+[server]
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#1f6f50"

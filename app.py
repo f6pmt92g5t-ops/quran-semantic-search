@@ -56,8 +56,11 @@ from nltk.stem.isri import ISRIStemmer
 # Page configuration
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Quran Search",
+    page_title="الباحث القرآني",
+    page_icon="📖",
     layout="centered",
+    initial_sidebar_state="collapsed",
+    menu_items={"Get help": None, "Report a bug": None, "About": "الباحث القرآني — مشروع تخرج"},
 )
 
 MODEL_NAME = "Amer-Surur1/quran-finetuned-mpnet"
@@ -1889,6 +1892,12 @@ CUSTOM_CSS = """
         :root { --ink:#eef1ec; --muted:#a3ada6; --line:#34403a; --paper:#18201c; --brand:#7cc4a4; --brand-soft:#223a30; }
         .verse-text mark { background: #4a3f22; } .chip { background: #111713; }
     }
+    /* إخفاء أدوات Streamlit الخاصة بالمطوّر عن المستخدم (القائمة، زر Deploy، الشريط العلوي، التذييل) */
+    #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"],
+    [data-testid="stStatusWidget"], [data-testid="stAppDeployButton"], .stDeployButton,
+    [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+    header[data-testid="stHeader"] { background: transparent; height: 0; }
+    .block-container { padding-top: 1.5rem; }
 </style>
 """
 
@@ -1982,7 +1991,8 @@ def main():
     model = load_model()
     D = load_data()
 
-    show_eval = st.sidebar.checkbox("تبويب التقييم (للمطورين)", value=False)
+    # تبويب التقييم للمطورين فقط: لا يظهر للمستخدم، ويُفتح بإضافة ?dev=1 لرابط الموقع.
+    show_eval = st.query_params.get("dev") == "1"
     names = ["البحث بالمعنى", "البحث بالكلمة"] + (["التقييم"] if show_eval else [])
     tabs = st.tabs(names)
 

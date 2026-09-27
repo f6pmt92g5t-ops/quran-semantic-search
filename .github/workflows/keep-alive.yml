@@ -1,0 +1,33 @@
+# يزور الموقع كل 6 ساعات حتى لا ينام على Streamlit Community Cloud
+# (ينام بعد 12 ساعة بلا زوّار). إذا وجده نائمًا يضغط زر الإيقاظ.
+name: keep-alive
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm i playwright@1 && npx playwright install --with-deps chromium
+      - env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          cat > ping.js <<'JS'
+          const { chromium } = require('playwright');
+          (async () => {
+            const url = process.env.APP_URL;
+            if (!url) { console.log('Set repository variable APP_URL to the app link'); process.exit(1); }
+            const b = await chromium.launch(); const p = await b.newPage();
+            await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
+            await p.waitForTimeout(8000);
+            const wake = p.getByRole('button', { name: /get this app back up/i });
+            if (await wake.count()) { console.log('App was asleep - waking'); await wake.first().click(); await p.waitForTimeout(90000); }
+            else console.log('App is awake');
+            await b.close();
+          })();
+          JS
+          node ping.js
