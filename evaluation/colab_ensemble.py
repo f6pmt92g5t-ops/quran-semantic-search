@@ -3,7 +3,7 @@
 دمج نموذجين دلاليين (النموذج الحالي + نموذج ثانٍ) وقياس أثر الدمج على نفس مقياس التقييم.
 يُشغَّل في Colab بعد colab_compare_models.py (يعيد استخدام ملف embeddings_<model>.npy المحفوظ).
 
-    !python colab_ensemble.py bge-m3            # أو: multilingual-e5-large
+    !python evaluation/colab_ensemble.py bge-m3            # أو: multilingual-e5-large
 
 لماذا: في المقارنة لم يتفوق أي نموذج جديد على الحالي إجمالًا، لكن BGE-M3 وجد آيات
 "صعبة" لا يجدها الحالي (2:155، 47:31 في الصبر على البلاء؛ 19:14، 31:14 في عقوق
@@ -12,6 +12,15 @@
 النموذج الحالي عبر كل الآيات (z-score)، ثم sem = (1-w)*الحالي + w*الثاني.
 التوحيد ضروري لأن مقاييس التشابه تختلف بين النماذج (e5 مثلًا درجاته كلها 0.7-0.9).
 """
+import os
+import sys
+
+# يُشغَّل من مجلد المستودع الرئيسي: python evaluation/<script>.py
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.chdir(ROOT)
+TEST_DATA = os.path.join("evaluation", "test_data")
+
 import sys
 import logging
 import warnings

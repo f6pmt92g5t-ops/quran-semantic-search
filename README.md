@@ -71,9 +71,7 @@ Details, per-query results and the comparison with multilingual-e5 and BGE-M3 ar
 | `tafsir_muyassar.csv` | Tafsir al-Muyassar (King Fahd Complex), one row per verse: `sura, aya, tafsir`. |
 | `quran-morphology.txt` | Quranic Arabic Corpus morphology v0.4 (Dukes & Habash 2010, GNU GPL; Arabic-script edition by [mustafa0x/quran-morphology](https://github.com/mustafa0x/quran-morphology)). |
 | `requirements.txt` | Python packages. |
-| `colab_compare_models.py` | Colab script: compares embedding models on the benchmark. |
-| `colab_ensemble.py` | Colab script: tests mixing the current model with a second model. |
-| `colab_test_bot.py` | Colab test bot: runs the app code with the real model on ~200 checks (known topics, verse fragments, colloquial and odd inputs, benchmark, speed) and writes `bot_report.xlsx`. |
+| `evaluation/` | Colab scripts and test query sets used to evaluate the system (see `evaluation/README.md`). |
 
 ## Run locally
 

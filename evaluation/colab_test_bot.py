@@ -7,17 +7,26 @@
     !git clone https://github.com/f6pmt92g5t-ops/quran-semantic-search
     %cd quran-semantic-search
     !pip -q install sentence-transformers nltk streamlit openpyxl
-    !python colab_test_bot.py
+    !python evaluation/colab_test_bot.py
     from google.colab import files; files.download("bot_report.xlsx")
 
 وش يختبر:
   1) مواضيع معروفة: لكل موضوع آية أو آيات يجب أن تظهر في أول 10 نتائج (مثل عقوق الوالدين ← 17:23).
   2) مقاطع آيات: يأخذ 5 كلمات من وسط آية عشوائية ويتأكد أن الآية نفسها تطلع في أول 3.
-  3) مقياس التقييم (16 موضوعًا) نفس تبويب Evaluation.
+  3) مقياس التقييم (16 موضوعًا) نفس لوحة التقييم في الموقع (?dev=1).
   4) مدخلات غريبة (إنجليزي، أرقام، رموز، نص طويل، عامية) — المهم ألا يحدث خطأ.
   5) السرعة: زمن كل بحث.
 ثم ورقة "Browse" فيها أول 5 نتائج لكل استعلام لتتصفحها بعينك.
 """
+import os
+import sys
+
+# يُشغَّل من مجلد المستودع الرئيسي: python evaluation/<script>.py
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.chdir(ROOT)
+TEST_DATA = os.path.join("evaluation", "test_data")
+
 import random
 import sys
 import time

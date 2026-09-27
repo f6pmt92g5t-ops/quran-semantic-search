@@ -6,7 +6,7 @@
     !git clone https://github.com/f6pmt92g5t-ops/quran-semantic-search
     %cd quran-semantic-search
     !pip -q install sentence-transformers nltk streamlit openpyxl
-    !python colab_compare_models.py
+    !python evaluation/colab_compare_models.py
 
 الناتج: جدول لكل نموذج (بحث دلالي فقط + البحث الهجين الكامل كما في الموقع) وملف
 model_comparison.csv، وملفات embeddings_<model>.npy لكل نموذج (float16) جاهزة للرفع.
@@ -16,6 +16,15 @@ model_comparison.csv، وملفات embeddings_<model>.npy لكل نموذج (fl
 (Rocchio) لم تعالج ذلك. نماذج الاسترجاع الأحدث (multilingual-e5، BGE-M3) دُرِّبت
 خصيصًا على مطابقة سؤال قصير بنص، وهو بالضبط استخدام الموقع.
 """
+import os
+import sys
+
+# يُشغَّل من مجلد المستودع الرئيسي: python evaluation/<script>.py
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.chdir(ROOT)
+TEST_DATA = os.path.join("evaluation", "test_data")
+
 import sys
 import time
 import logging

@@ -8,11 +8,20 @@
     !git clone https://github.com/f6pmt92g5t-ops/quran-semantic-search
     %cd quran-semantic-search
     !pip -q install sentence-transformers nltk streamlit openpyxl
-    !python colab_encode_queries.py
+    !python evaluation/colab_encode_queries.py
     from google.colab import files; files.download("query_vectors.npz")
 
 الاستعلامات من test_queries.txt (سطر لكل استعلام) و test_fragments.tsv (مقطع<TAB>آية).
 """
+import os
+import sys
+
+# يُشغَّل من مجلد المستودع الرئيسي: python evaluation/<script>.py
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.chdir(ROOT)
+TEST_DATA = os.path.join("evaluation", "test_data")
+
 import logging
 import warnings
 
@@ -28,11 +37,12 @@ from sentence_transformers import SentenceTransformer  # noqa: E402
 def main():
     queries = []
     for name in ("test_queries.txt", "test_queries2.txt", "test_queries3.txt", "test_queries_en.txt"):
+        name = os.path.join(TEST_DATA, name)
         try:
             queries += [q.strip() for q in open(name, encoding="utf-8") if q.strip()]
         except FileNotFoundError:
             pass
-    queries += [line.split("\t")[0].strip() for line in open("test_fragments.tsv", encoding="utf-8") if line.strip()]
+    queries += [line.split("\t")[0].strip() for line in open(os.path.join(TEST_DATA, "test_fragments.tsv"), encoding="utf-8") if line.strip()]
     # النص كما يرمّزه الموقع: الاستعلام كاملًا، والنسخة المنظّفة من كلمات صياغة السؤال (semantic_text)
     texts = list(dict.fromkeys([app.normalize_arabic(q) for q in queries] + [app.semantic_text(q) for q in queries]))
     model = SentenceTransformer(app.MODEL_NAME)

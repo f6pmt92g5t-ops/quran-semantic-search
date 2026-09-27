@@ -1675,7 +1675,7 @@ def load_data() -> SearchData:
         win_emb = np.load(win_path).astype(np.float32)
         if len(windows) != win_emb.shape[0]:
             raise ValueError(f"window_embeddings.npy has {win_emb.shape[0]} rows but segments.csv gives "
-                             f"{len(windows)} windows — regenerate it with colab_encode_windows.py.")
+                             f"{len(windows)} windows — regenerate it (window experiment, report Section 5.3.3).")
         wseg = windows["segment"].to_numpy()
         D.win_emb = win_emb / np.linalg.norm(win_emb, axis=1, keepdims=True)
         D.win_v = seg_v[wseg]
@@ -1910,7 +1910,7 @@ def legacy_ranking(query: str, cos: np.ndarray, D: SearchData) -> list:
 # القائمة بُنيت بطريقة "التجميع" (pooling) المعتمدة في تقييم محركات البحث (TREC):
 # قائمة أولية بالآيات الأساسية، ثم حُكم يدويًا على كل آية ظهرت في أول 10 نتائج
 # للنظامين القديم والجديد، وأُضيف منها ما يتعلق بالموضوع — حتى لا يُظلم أي نظام.
-# جولة تجميع ثانية شملت نتائج نماذج e5 وBGE-M3 (انظر colab_compare_models.py).
+# جولة تجميع ثانية شملت نتائج نماذج e5 وBGE-M3 (انظر evaluation/colab_compare_models.py).
 # ---------------------------------------------------------------------------
 GOLD = {
     "الجنة والنار": "59:20 7:44 7:46 7:50 13:35 47:15 3:185 2:221 5:72 42:7 41:40 2:81 2:82 11:106 11:108 104:6 3:10 47:12",

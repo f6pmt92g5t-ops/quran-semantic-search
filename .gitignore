@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
+*.npz
+bot_report.xlsx
+model_*.csv
+ensemble_*.csv
+embeddings_*.npy
