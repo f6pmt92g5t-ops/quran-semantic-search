@@ -71,6 +71,7 @@ Details, per-query results and the comparison with multilingual-e5 and BGE-M3 ar
 | `tafsir_muyassar.csv` | Tafsir al-Muyassar (King Fahd Complex), one row per verse: `sura, aya, tafsir`. |
 | `quran-morphology.txt` | Quranic Arabic Corpus morphology v0.4 (Dukes & Habash 2010, GNU GPL; Arabic-script edition by [mustafa0x/quran-morphology](https://github.com/mustafa0x/quran-morphology)). |
 | `requirements.txt` | Python packages. |
+| `notebooks/` | Colab notebooks: `01_data_preparation` (text, normalization, Tajweed segmentation, first prototype, early evaluation), `02_fine_tuning` (training the model on verse–tafsir pairs), `03_evaluation` (runs the evaluation scripts). |
 | `evaluation/` | Colab scripts and test query sets used to evaluate the system (see `evaluation/README.md`). |
 
 ## Run locally
