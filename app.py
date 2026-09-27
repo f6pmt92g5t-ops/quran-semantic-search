@@ -754,6 +754,10 @@ def _nfc(text):
 # والآية تأخذ أعلى تشابه بين أجزائها ونوافذها.
 WINDOW_WORDS = 6
 WINDOW_STRIDE = 3
+WINDOW_PENALTY = 0.15  # يُطرح من تشابه النافذة قبل مقارنته بتشابه الجزء الكامل
+# النتيجة المقاسة (استعلامات حقيقية): النوافذ لم تحسّن التقييم — عقوبة 0 أنزلت P@10 من 0.812
+# إلى 0.731 (نصوص قصيرة أكثر = تطابقات زائفة أكثر)، وعقوبة 0.15 تعادل عدم استخدامها. لذلك ملف
+# window_embeddings.npy غير مرفوع، والكود يعمل بدونها؛ نبقيه لمن يريد إعادة التجربة.
 
 
 def make_windows(segments_df: pd.DataFrame) -> pd.DataFrame:
@@ -1319,6 +1323,19 @@ def load_data() -> SearchData:
     D.seg_v = seg_v
     D.prim = long_enough & ~is_basmala & ~is_formula
     D.second = long_enough & ~is_basmala & is_formula
+    # النوافذ (انظر make_windows): اختيارية — إذا لم يوجد الملف يعمل البحث بالأجزاء فقط.
+    D.win_emb = None
+    win_path = os.path.join(BASE_DIR, "window_embeddings.npy")
+    if os.path.exists(win_path):
+        windows = make_windows(segments_df)
+        win_emb = np.load(win_path).astype(np.float32)
+        if len(windows) != win_emb.shape[0]:
+            raise ValueError(f"window_embeddings.npy has {win_emb.shape[0]} rows but segments.csv gives "
+                             f"{len(windows)} windows — regenerate it with colab_encode_windows.py.")
+        wseg = windows["segment"].to_numpy()
+        D.win_emb = win_emb / np.linalg.norm(win_emb, axis=1, keepdims=True)
+        D.win_v = seg_v[wseg]
+        D.win_mask = D.prim[wseg]        # نوافذ الأجزاء الأساسية فقط (لا بسملة ولا عبارات متكررة)
     D.legacy_mask = long_enough            # v2 behaviour (for the evaluation tab)
     D.n = n
 
@@ -1345,6 +1362,9 @@ def semantic_components(query: str, model, D: SearchData):
     cos = D.emb @ q
     sem = _verse_max(cos, D.seg_v, D.prim, D.n)
     sem2 = _verse_max(cos, D.seg_v, D.second, D.n)
+    if D.win_emb is not None:
+        wsem = _verse_max(D.win_emb @ q - WINDOW_PENALTY, D.win_v, D.win_mask, D.n)
+        sem = np.fmax(sem, wsem)          # fmax: يتجاهل NaN/-inf من جهة واحدة
     sem = np.where(np.isfinite(sem), sem, sem2)
     sem = np.where(np.isfinite(sem), sem, 0.0).astype(np.float32)
     return sem, cos
