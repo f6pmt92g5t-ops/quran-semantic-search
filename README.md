@@ -24,6 +24,11 @@ verses use that root, with a link to all of them. Also: Arabic/English interface
 translation (`?lang=en`), voice search, "did you mean" for typos, a chart of where a root appears across surahs,
 surah/juz filters, shareable links (`?q=...&m=word`) and Excel export. The developer benchmark opens with `?dev=1`.
 
+In meaning mode the user can choose the **retrieval unit** — Tajweed segments (default), the full verse, or both —
+and every result shows its semantic similarity (cosine), word-match score L(v), final score, and the part of the
+verse closest to the query. On the benchmark, segments give P@10 0.812 against 0.712 for full verses (report,
+Table 5.8).
+
 **User ratings (optional):** 👍/👎 under each result are saved to a GitHub Gist when the app has two Streamlit
 secrets, `GIST_TOKEN` (a token with the *gist* scope) and `GIST_ID`. Without them the buttons are hidden.
 The summary appears in the `?dev=1` panel.
