@@ -21,6 +21,7 @@ Use a T4 GPU runtime (Runtime → Change runtime type) for the model comparison.
 |---|---|---|---|
 | `colab_test_bot.py` | Runs the app code with the real model on ~200 automatic checks: known topics, verse fragments, colloquial and odd inputs, the benchmark, and speed. | `bot_report.xlsx` | 4.3 |
 | `colab_encode_queries.py` | Encodes all test queries with the real model into one small file, so the full app can be tested offline without downloading the model. | `query_vectors.npz` | 4.2.2 Step 19 |
+| `colab_encode_verses.py` | Encodes every full verse with the fine-tuned model, for the "Full verse" and "Both" retrieval units of the website. | `verse_embeddings.npy` | 4.2.2 Step 20 |
 | `colab_compare_models.py` | Compares the fine-tuned model with multilingual-e5-base, multilingual-e5-large and BGE-M3 on the benchmark. | `model_summary.csv`, `model_comparison.csv` | Table 5.5 |
 | `colab_ensemble.py` | Tests mixing the fine-tuned model with a second model (run after `colab_compare_models.py`). | `ensemble_summary.csv` | 5.3.3 |
 

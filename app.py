@@ -1662,6 +1662,7 @@ def load_data() -> SearchData:
 
     D.emb = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
     D.seg_v = seg_v
+    D.seg_text = segments_df["text"].to_numpy()
     D.prim = long_enough & ~is_basmala & ~is_formula
     D.second = long_enough & ~is_basmala & is_formula
     # آيات كلها قصيرة ("ألهاكم التكاثر" 102:1، "والشمس وضحاها" 91:1): أجزاؤها أقل من 3 كلمات
@@ -1812,9 +1813,32 @@ def semantic_text(query: str) -> str:
     return " ".join(kept) if kept else " ".join(words)
 
 
-def semantic_components(query: str, model, D: SearchData):
+# وحدة الاسترجاع (Retrieval unit): أجزاء التجويد (الافتراضي، المقاس في التقرير)، الآية كاملة، أو الاثنان معًا
+UNITS = ("segment", "verse", "both")
+VERSE_EMB_FILE = os.path.join(BASE_DIR, "verse_embeddings.npy")
+
+
+@st.cache_resource(show_spinner="جاري تجهيز تمثيلات الآيات الكاملة (مرة واحدة فقط)...")
+def load_verse_embeddings(_model, _D) -> np.ndarray:
+    """متجه لكل آية كاملة بنفس النموذج. يُقرأ من verse_embeddings.npy إن وُجد، وإلا يُحسب مرة واحدة."""
+    if os.path.exists(VERSE_EMB_FILE):
+        e = np.load(VERSE_EMB_FILE).astype(np.float32)
+    else:
+        e = _model.encode([normalize_arabic(t) for t in _D.verses.text], batch_size=64,
+                          convert_to_numpy=True).astype(np.float32)
+    return e / np.maximum(np.linalg.norm(e, axis=1, keepdims=True), 1e-12)
+
+
+def encode_query(query: str, model) -> np.ndarray:
     q = model.encode(semantic_text(query) if SEMANTIC_CLEAN else normalize_arabic(query)).astype(np.float32)
-    q /= np.linalg.norm(q) + 1e-12
+    return q / (np.linalg.norm(q) + 1e-12)
+
+
+def semantic_components(query: str, model, D: SearchData, unit: str = "segment", verse_emb=None, q=None):
+    """S(v) لكل آية. segment = أعلى تشابه بين السؤال وأي جزء من الآية؛ verse = تشابه السؤال مع الآية كاملة؛
+    both = الأعلى من الاثنين. يرجع أيضًا تشابه كل جزء (cos) لإظهار الجزء الأقرب."""
+    if q is None:
+        q = encode_query(query, model)
     cos = D.emb @ q
     sem = _verse_max(cos, D.seg_v, D.prim, D.n)
     sem2 = _verse_max(cos, D.seg_v, D.second, D.n)
@@ -1825,7 +1849,18 @@ def semantic_components(query: str, model, D: SearchData):
     sem3 = _verse_max(cos - SHORT_PENALTY, D.seg_v, D.short, D.n)
     sem = np.where(np.isfinite(sem), sem, sem3)
     sem = np.where(np.isfinite(sem), sem, 0.0).astype(np.float32)
+    if unit != "segment" and verse_emb is not None:
+        vsem = (verse_emb @ q).astype(np.float32)
+        sem = vsem if unit == "verse" else np.maximum(sem, vsem)
     return sem, cos
+
+
+def best_segments(cos: np.ndarray, D: SearchData) -> np.ndarray:
+    """لكل آية: رقم جزئها الأقرب إلى السؤال (أعلى تشابه)."""
+    best = np.full(D.n, -1, dtype=np.int64)
+    order = np.argsort(cos, kind="stable")
+    best[D.seg_v[order]] = order          # الأعلى تشابهًا يُكتب أخيرًا فيبقى
+    return best
 
 
 def _merge_identical(df: pd.DataFrame, D: SearchData) -> pd.DataFrame:
@@ -1844,9 +1879,11 @@ def _merge_identical(df: pd.DataFrame, D: SearchData) -> pd.DataFrame:
     return out
 
 
-def semantic_search(query: str, model, D: SearchData, sem_cos=None) -> pd.DataFrame:
+def semantic_search(query: str, model, D: SearchData, sem_cos=None, unit: str = "segment",
+                    verse_emb=None) -> pd.DataFrame:
+    cos = None
     if sem_cos is None:
-        sem, _cos = semantic_components(query, model, D)
+        sem, cos = semantic_components(query, model, D, unit, verse_emb)
     else:
         sem = sem_cos
     lexical, _tiers, word_tier, used = analyze_query(query, D.lex)
@@ -1869,6 +1906,10 @@ def semantic_search(query: str, model, D: SearchData, sem_cos=None) -> pd.DataFr
         "relevant": relevant[order],
     })
     df["matched"] = [matched.get(int(i), "") for i in order]
+    if cos is not None:
+        best = best_segments(cos, D)[order]
+        df["seg_best"] = best
+        df["seg_cos"] = np.where(best >= 0, cos[np.maximum(best, 0)], np.nan)
     return _merge_identical(df, D).reset_index(drop=True)
 
 
@@ -2242,6 +2283,9 @@ TXT = {
         tafsir_src="التفسير الميسر — مجمع الملك فهد لطباعة المصحف الشريف", why="من التفسير:",
         did_you_mean="هل تقصد:", chart="توزيع الجذر على السور (أكثر {n} سور)", chart_x="عدد الآيات", chart_y="السورة",
         fb_q="هل هذه النتيجة مفيدة؟", fb_thanks="شكرًا، سُجّل تقييمك", about="عن الباحث القرآني",
+        unit_label="وحدة الاسترجاع", unit_segment="مقاطع تجويدية", unit_verse="آية كاملة", unit_both="الاثنان معًا",
+        m_cos="تشابه المعنى", m_lex="تطابق الكلمات", m_score="الدرجة النهائية", m_match="قوة التطابق",
+        best_seg="الجزء الأقرب إلى سؤالك",
         about_body=("- **البحث بالمعنى**: يفهم سؤالك ولو اختلفت ألفاظه عن ألفاظ الآيات، بنموذج لغوي دُرّب على آيات القرآن "
                     "وتفسيرها، مع مطابقة الكلمات وجذورها من مدوّنة القرآن الكريم الصرفية.\n"
                     "- **البحث بالكلمة وجذرها**: يعرض كل آية فيها كلمة من جذر كلمتك، الكلمة نفسها ومشتقاتها القريبة أولًا.\n"
@@ -2269,6 +2313,9 @@ TXT = {
         tafsir_src="Tafsir al-Muyassar — King Fahd Complex", why="From the tafsir:",
         did_you_mean="Did you mean:", chart="Where this root appears (top {n} surahs)", chart_x="Verses", chart_y="Surah",
         fb_q="Was this result helpful?", fb_thanks="Thank you, your rating was saved", about="About",
+        unit_label="Retrieval unit", unit_segment="Tajweed segments", unit_verse="Full verse", unit_both="Both",
+        m_cos="Semantic similarity", m_lex="Word match", m_score="Final score", m_match="Match strength",
+        best_seg="Closest part to your query",
         about_body=("- **By meaning**: understands your question even when its words differ from the verses, using a language "
                     "model trained on the Quran and its tafsir, combined with Arabic word and root matching.\n"
                     "- **By Arabic word & root**: every verse with a word from the same root, exact word first.\n"
@@ -2389,8 +2436,33 @@ def tafsir_why(D, i: int, stems: set) -> str:
     return ""
 
 
+def metrics_html(D, r, lang: str, mode: str, unit: str) -> str:
+    """مقياس الصلة لكل آية: تشابه المعنى (Cosine)، تطابق الكلمات، الدرجة النهائية، والجزء الأقرب."""
+    import html as _h
+    T = TXT[lang]
+
+    def meter(label, sub, value, frac, cls=""):
+        w = max(0.0, min(1.0, float(frac))) * 100
+        return (f'<div class="meter {cls}"><span class="mlab">{label}<small>{sub}</small></span>'
+                f'<span class="bar"><i style="width:{w:.0f}%"></i></span><b>{value:.3f}</b></div>')
+
+    if mode == "word":
+        return f'<div class="metrics">{meter(T["m_match"], "L(v)", float(r.score), float(r.score) / TIER_CORE)}</div>'
+    cos, lex, score = float(r.semantic), float(r.lexical), float(r.score)
+    html = ('<div class="metrics">'
+            + meter(T["m_cos"], "Cosine · " + T["unit_" + unit], cos, cos, "cos")
+            + meter(T["m_lex"], "L(v)", lex, lex / TIER_CORE)
+            + meter(T["m_score"], f"S + {BETA_LEXICAL}×L", score, score / (1 + BETA_LEXICAL * TIER_CORE))
+            + '</div>')
+    seg = int(getattr(r, "seg_best", -1))
+    if unit != "verse" and seg >= 0 and (D.seg_v == D.seg_v[seg]).sum() > 1:
+        html += (f'<div class="bestseg"><span>{T["best_seg"]} · Cosine {float(r.seg_cos):.3f}</span>'
+                 f'<span class="ctx" dir="rtl">{_h.escape(_display_text(D.seg_text[seg]))}</span></div>')
+    return html
+
+
 def verse_card(D, i: int, lang: str = "ar", matched: str = "", also: str = "", label: str = "",
-               why_stems: set = None) -> str:
+               why_stems: set = None, metrics: str = "") -> str:
     import html as _h
     s, a = int(D.verses.sura[i]), int(D.verses.aya[i])
     name = _sname(lang, s)
@@ -2432,7 +2504,7 @@ def verse_card(D, i: int, lang: str = "ar", matched: str = "", also: str = "", l
            else f'{name}<span class="sep">◆</span>{s}:{a}')
     return (f'<div class="verse-card"><div class="verse-head"><span class="verse-ref">{ref}</span>{head_left}</div>'
             f'<div class="verse-text" dir="rtl">{_verse_html(D, i, matched, lang)}<span class="ayah-num">{_ar(a)}</span></div>'
-            f'{trans}{foot}<div class="actions">{actions}</div></div>')
+            f'{trans}{metrics}{foot}<div class="actions">{actions}</div></div>')
 
 
 # ---------------------------------------------------------------------------
@@ -2481,20 +2553,24 @@ def _save_feedback(key: str, lang: str, mode: str, query: str, ref: str, rank: i
         pass
 
 
-def render_results(df: pd.DataFrame, D, limit: int, lang: str, why_stems=None, fb=None):
+def render_results(df: pd.DataFrame, D, limit: int, lang: str, why_stems=None, fb=None, mode="meaning",
+                   unit="segment"):
     rows = list(df.head(limit).itertuples())
+
+    def card(r):
+        return verse_card(D, int(r.vidx), lang, getattr(r, "matched", ""), getattr(r, "also", ""),
+                          why_stems=why_stems, metrics=metrics_html(D, r, lang, mode, unit))
+
     if not fb:
-        st.markdown("".join(verse_card(D, int(r.vidx), lang, getattr(r, "matched", ""), getattr(r, "also", ""),
-                                       why_stems=why_stems) for r in rows), unsafe_allow_html=True)
+        st.markdown("".join(card(r) for r in rows), unsafe_allow_html=True)
         return
-    mode, query = fb
+    fb_mode, query = fb
     for rank, r in enumerate(rows, 1):
-        st.markdown(verse_card(D, int(r.vidx), lang, getattr(r, "matched", ""), getattr(r, "also", ""),
-                               why_stems=why_stems), unsafe_allow_html=True)
+        st.markdown(card(r), unsafe_allow_html=True)
         ref = f"{int(r.sura)}:{int(r.aya)}"
-        key = f"fb_{abs(hash((query, mode))) % 10**8}_{ref}"
+        key = f"fb_{abs(hash((query, fb_mode, unit))) % 10**8}_{ref}"
         with st.container(key=f"fbbox_{key}"):
-            st.feedback("thumbs", key=key, on_change=_save_feedback, args=(key, lang, mode, query, ref, rank))
+            st.feedback("thumbs", key=key, on_change=_save_feedback, args=(key, lang, fb_mode, query, ref, rank))
 
 
 def download_button(df: pd.DataFrame, cols: list, name: str, key: str, lang: str):
@@ -2652,6 +2728,19 @@ EXTRA_CSS = """
   @keyframes qspulse { 0% { box-shadow: 0 0 0 0 rgba(155,44,44,.5); } 100% { box-shadow: 0 0 0 12px rgba(155,44,44,0); } }
   [data-testid="stSelectbox"] [role="group"] { padding-left: 3.4rem; }
   .st-key-langbox { margin-bottom: -.4rem; }
+  .st-key-unitbox [data-testid="stWidgetLabel"] p { font-size: .82rem; color: var(--muted); }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: .35rem .9rem;
+             margin: .55rem 0 .1rem; padding: .55rem .8rem; background: #fbf6ea; border-radius: 12px; }
+  .meter { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: .45rem; font-size: .78rem; }
+  .meter .mlab { color: var(--ink); white-space: nowrap; }
+  .meter .mlab small { display: block; color: var(--muted); font-size: .66rem; line-height: 1.1; }
+  .meter .bar { height: 7px; background: #eadfc6; border-radius: 99px; overflow: hidden; }
+  .meter .bar i { display: block; height: 100%; background: var(--gold); border-radius: 99px; }
+  .meter.cos .bar i { background: var(--green); }
+  .meter b { font-variant-numeric: tabular-nums; color: var(--green); font-size: .85rem; direction: ltr; }
+  .bestseg { margin-top: .4rem; font-size: .8rem; color: var(--muted); }
+  .bestseg > span:first-child { display: block; color: var(--gold); margin-bottom: .1rem; }
+  .bestseg .ctx { font-size: 1.15rem; line-height: 2rem; color: var(--ink); }
   [data-testid="stVegaLiteChart"], [data-testid="stArrowVegaLiteChart"], .vega-embed { direction: ltr !important; }
   .st-key-langbox [data-testid="stButtonGroup"] button { padding: .1rem .7rem !important; min-height: 0 !important; font-size: .8rem; }
 </style>
@@ -2680,6 +2769,7 @@ def main():
         st.session_state.q = (st.query_params.get("q") or "")[:200] or None
         st.session_state.mode = "word" if st.query_params.get("m") == "word" else "meaning"
         st.session_state.lang = "en" if st.query_params.get("lang") == "en" else "ar"
+        st.session_state.unit = st.query_params.get("u") if st.query_params.get("u") in UNITS else "segment"
     lang = st.session_state.get("lang") or "ar"
     T = TXT[lang]
 
@@ -2720,12 +2810,19 @@ def main():
                                    format_func=lambda n: f"{_num(lang, n)} · {_sname(lang, n)}")
             juz = st.selectbox(T["juz"], [0] + list(range(1, 31)), key="f_juz",
                                format_func=lambda n: T["all_juz"] if n == 0 else _t(lang, "juz_n", n=_num(lang, n)))
+    if (st.session_state.mode or "meaning") == "meaning":
+        with st.container(key="unitbox"):
+            st.segmented_control(T["unit_label"], list(UNITS), key="unit", required=True,
+                                 format_func=lambda u: T["unit_" + u])
     st.pills("topics", FEATURED_EN if lang == "en" else FEATURED_TOPICS, key="pill", on_change=_pick_topic,
              label_visibility="collapsed")
 
     query = (st.session_state.q or "")[:200].strip()
     mode = st.session_state.mode or "meaning"
+    unit = st.session_state.get("unit") or "segment"
     params = {"q": query, "m": mode}
+    if mode == "meaning" and unit != "segment":
+        params["u"] = unit
     if lang == "en":
         params["lang"] = "en"
     if dev:
@@ -2738,7 +2835,7 @@ def main():
     en_map = {k.lower(): v for k, v in EN_TOPICS.items()}
     search_q = en_map.get(query.lower(), query)
 
-    sig = (query, mode, tuple(suras), juz, lang)
+    sig = (query, mode, tuple(suras), juz, lang, unit)
     if st.session_state.get("sig") != sig:
         st.session_state.sig, st.session_state.limit = sig, RESULTS_SHOWN
     limit = st.session_state.limit
@@ -2783,13 +2880,14 @@ def main():
                             f'<span>{T["root_order"]}</span></div>', unsafe_allow_html=True)
                 if matches["sura"].nunique() > 1:
                     _root_chart(matches, lang)
-                render_results(matches, D, limit, lang, fb=("word", query) if fb else None)
+                render_results(matches, D, limit, lang, fb=("word", query) if fb else None, mode="word")
                 if len(matches) > limit:
                     st.button(_t(lang, "more", n=_num(lang, len(matches) - limit)), on_click=_more, width="stretch")
                 download_button(matches, ["text", "score", "words_matched", "matched", "also"], "word_search",
                                 "text_dl", lang)
     else:
-        results = in_scope(semantic_search(search_q, model, D))
+        verse_emb = load_verse_embeddings(model, D) if unit != "segment" else None
+        results = in_scope(semantic_search(search_q, model, D, unit=unit, verse_emb=verse_emb))
         relevant = results[results["relevant"]]
         shown = relevant if not relevant.empty else results
         if results.empty:
@@ -2801,10 +2899,11 @@ def main():
                 st.markdown(f'<div class="count"><span>{_t(lang, "relevant", n=_num(lang, len(relevant)), scope=scope)}</span>'
                             f'<span>{T["rel_order"]}</span></div>', unsafe_allow_html=True)
             why_stems = {tafsir_stem(w) for w in semantic_text(search_q).split()} - {""}
-            render_results(shown, D, limit, lang, why_stems=why_stems, fb=("meaning", query) if fb else None)
+            render_results(shown, D, limit, lang, why_stems=why_stems, fb=("meaning", query) if fb else None,
+                           mode="meaning", unit=unit)
             if len(shown) > limit:
                 st.button(_t(lang, "more", n=_num(lang, len(shown) - limit)), on_click=_more, width="stretch")
-            download_button(results, ["text", "score", "semantic", "lexical", "relevant", "matched", "also"],
+            download_button(results, ["text", "score", "semantic", "lexical", "relevant", "seg_cos", "matched", "also"],
                             "meaning_search", "sem_dl", lang)
 
     with st.expander(T["about"]):
