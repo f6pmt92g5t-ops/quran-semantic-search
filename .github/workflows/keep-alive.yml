@@ -1,33 +1,29 @@
-# يزور الموقع كل 6 ساعات حتى لا ينام على Streamlit Community Cloud
-# (ينام بعد 12 ساعة بلا زوّار). إذا وجده نائمًا يضغط زر الإيقاظ.
+# يزور الموقع كل 3 ساعات مثل أي زائر:
+# - إذا كان نائمًا يضغط زر الإيقاظ وينتظر حتى يشتغل.
+# - إذا لم يفتح (نائم لم يصحُ، خطأ، أو رسالة منع وصول) يفشل التشغيل،
+#   فيرسل GitHub رسالة بريد لصاحب المستودع، ومعها صورة للصفحة في Artifacts.
 name: keep-alive
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 */3 * * *"
   workflow_dispatch:
 jobs:
-  ping:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: npm i playwright@1 && npx playwright install --with-deps chromium
-      - env:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -q playwright && python -m playwright install --with-deps chromium
+      - name: Open the website and check it loads
+        env:
           APP_URL: ${{ vars.APP_URL }}
-        run: |
-          cat > ping.js <<'JS'
-          const { chromium } = require('playwright');
-          (async () => {
-            const url = process.env.APP_URL;
-            if (!url) { console.log('Set repository variable APP_URL to the app link'); process.exit(1); }
-            const b = await chromium.launch(); const p = await b.newPage();
-            await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
-            await p.waitForTimeout(8000);
-            const wake = p.getByRole('button', { name: /get this app back up/i });
-            if (await wake.count()) { console.log('App was asleep - waking'); await wake.first().click(); await p.waitForTimeout(90000); }
-            else console.log('App is awake');
-            await b.close();
-          })();
-          JS
-          node ping.js
+        run: python .github/keepalive.py
+      - name: Save a screenshot of the failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keepalive-failure
+          path: keepalive_failure.png
+          if-no-files-found: ignore
